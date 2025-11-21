@@ -12,7 +12,7 @@ This repository hosts the backend logic for a **closed-loop ventilator control s
 
 This research is divided into four distinct engineering phases.
 
-- [x] **Phase 1: Signal Processing & Artifact Removal**
+- [ ] **Phase 1: Signal Processing & Artifact Removal**
     - [x] Import proprietary `.mat` / `.orb` HD-sEMG data.
     - [x] Implement 50Hz Notch and 20-400Hz Bandpass filtering.
     - [x] Develop Blind Source Separation (BSS) using `FastICA`.
