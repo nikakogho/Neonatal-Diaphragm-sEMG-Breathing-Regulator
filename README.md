@@ -18,14 +18,11 @@ This research is divided into four distinct engineering phases.
     - [x] Develop Blind Source Separation (BSS) using `FastICA`.
     - [x] Create an automated "Hunter-Killer" classifier to identify Heart (ECG) and Noise artifacts.
     - [x] Generate clean, rectifed Bicubic Heatmaps of muscle activation.
-- [ ] **Phase 2: Spatial Feature Extraction**
-    - [ ] Calculate weighted centroids of muscle activation (Center of Gravity).
-    - [ ] Detect "Respiratory Shift" (vertical movement from Diaphragm -> Chest).
-    - [ ] Quantify Asymmetry (Left vs. Right lung activation).
-- [ ] **Phase 3: Machine Learning (Clinical Assessment)**
+    - [ ] Automate same + united heatmap for all grids
+- [ ] **Phase 2: Machine Learning (Clinical Assessment)**
     - [ ] Train a classifier to distinguish "Healthy Breathing" vs. "Respiratory Distress".
     - [ ] Detect specific pathologies (e.g., Pneumothorax signatures).
-- [ ] **Phase 4: Control Logic**
+- [ ] **Phase 4: Control Logic (Hypothetical)**
     - [ ] Implement PID-style logic to adjust ventilator pressure based on EMG effort.
     - [ ] Simulate feedback loops for "Patient-Ventilator Asynchrony" prevention.
 
@@ -66,7 +63,7 @@ This pipeline utilizes **Blind Source Separation (BSS)** via Independent Compone
 ### Setup
 ```bash
 # Clone the repository
-git clone [https://github.com/nikakogho/Neonatal-Diaphragm-sEMG-Breathing-Regulator.git](https://github.com/nikakogho/Neonatal-Diaphragm-sEMG-Breathing-Regulator.git)
+git clone https://github.com/nikakogho/Neonatal-Diaphragm-sEMG-Breathing-Regulator.git
 cd Neonatal-Diaphragm-sEMG-Breathing-Regulator
 
 # Install dependencies
