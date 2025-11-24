@@ -12,13 +12,13 @@ This repository hosts the backend logic for a **closed-loop ventilator control s
 
 This research is divided into four distinct engineering phases.
 
-- [ ] **Phase 1: Signal Processing & Artifact Removal**
+- [x] **Phase 1: Signal Processing & Artifact Removal**
     - [x] Import proprietary `.mat` / `.orb` HD-sEMG data.
     - [x] Implement 50Hz Notch and 20-400Hz Bandpass filtering.
     - [x] Develop Blind Source Separation (BSS) using `FastICA`.
     - [x] Create an automated "Hunter-Killer" classifier to identify Heart (ECG) and Noise artifacts.
     - [x] Generate clean, rectifed Bicubic Heatmaps of muscle activation.
-    - [ ] Automate same + united heatmap for all grids
+    - [x] Automate same + united heatmap for all grids
 - [ ] **Phase 2: Machine Learning (Clinical Assessment)**
     - [ ] Train a classifier to distinguish "Healthy Breathing" vs. "Respiratory Distress".
     - [ ] Detect specific pathologies (e.g., Pneumothorax signatures).

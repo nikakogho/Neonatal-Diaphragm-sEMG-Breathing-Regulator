@@ -30,8 +30,8 @@ def ICA(data):
     return ica, sources
 
 def analyze_envelope_refined(sources, fs):
-    MAX_HEART_COMPONENTS = 30
-    MAX_ARTICAT_COMPONENTS = 30
+    MAX_HEART_COMPONENTS = 3
+    MAX_ARTIFACT_COMPONENT = 4
     hearts, hf_noise, other_noise = [], [], []
     print(f"{'ID':<4} | {'Freq':<6} | {'Kurt':<6} | {'Reg (s)':<8} | {'Verdict'}")
     print("-" * 50)
@@ -62,7 +62,7 @@ def analyze_envelope_refined(sources, fs):
             if regularity < 0.20 and len(hearts) < MAX_HEART_COMPONENTS:
                 verdict = "HEART"
                 hearts.append(i)
-            elif len(other_noise) < MAX_ARTICAT_COMPONENTS:
+            elif len(other_noise) < MAX_ARTIFACT_COMPONENT:
                 verdict = "ARTIFACT" 
                 other_noise.append(i)
         
@@ -210,7 +210,7 @@ def visualize_grid_animation(grid_data, fs, fps=30, grid_id=1):
     plt.show()
     return anim
 
-file_path = 'PARTICIPANT_1/Tube/Fast_Deep_Breathing_4_tube.otb+.mat'
+file_path = 'PARTICIPANT_1/Tube/Relaxed_Breathing_1_tube.otb+.mat'
 if not os.path.exists(file_path):
     print("File not found!")
     exit()
@@ -235,5 +235,5 @@ for i in range(6):
 ## Visualize Frames 2000, 2500, 3000 (adjust as needed)
 #visualize_full_torso(all_grids_video, fs, frames_to_show=[2000, 2500, 3000])
 
-grid1anim = visualize_grid_animation(all_grids_video[0], fs, fps=30, grid_id=1)
-#anim = visualize_torso_animation(all_grids_video, fs, fps=30)
+#grid1anim = visualize_grid_animation(all_grids_video[0], fs, fps=30, grid_id=1)
+anim = visualize_torso_animation(all_grids_video, fs, fps=30)
