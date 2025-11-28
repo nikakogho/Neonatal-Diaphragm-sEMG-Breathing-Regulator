@@ -29,7 +29,7 @@ This research is divided into four distinct engineering phases.
 ---
 
 ## ⚡ Phase 1: The Engineering Challenge (Signal Cleaning)
-*Current State: Completed*
+*Current State: In Progress*
 
 Surface EMG on the torso is chemically noisy. The signal of interest (Diaphragm) is effectively "whispering" while the heart (ECG) is "shouting."
 * **Diaphragm Signal:** Stochastic, Gaussian distribution, Low Amplitude (~10µV).
