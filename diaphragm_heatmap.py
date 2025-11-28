@@ -9,6 +9,7 @@ import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
+import concurrent.futures
 
 # ==========================================
 #        CONFIGURATION & MAPPING
@@ -47,68 +48,80 @@ def filter_data(data, fs):
     return data
 
 def ICA(data):
-    n_components = 35 # Robust rank for 64 channels
+    n_components = 25 # Robust rank for 64 channels
     ica = FastICA(n_components=n_components, random_state=42, whiten='unit-variance')
     sources = ica.fit_transform(data) # Returns (Samples, Components)
 
     return ica, sources
 
 def analyze_envelope_refined(sources, fs):
-    hearts, hf_noise, other_noise = [], [], []
-    print(f"{'ID':<4} | {'Freq':<6} | {'Kurt':<6} | {'Reg (s)':<8} | {'Verdict'}")
-    print("-" * 50)
+    """
+    Optimized: Uses a strided view for statistical analysis to speed up calculation.
+    """
+    MAX_HEART_COMPONENTS = 6
+    candidates = []
+    hf_noise = []
+    
+    # OPTIMIZATION: Downsample signal for statistics only (Stride 4 -> 512Hz effective)
+    # This speeds up Welch and Peak Finding by 4x without losing 1Hz Heart/Breathing data.
+    stride = 4
+    fs_stat = fs / stride
     
     for i in range(sources.shape[1]):
         sig = sources[:, i]
-        kurt = kurtosis(sig)
+        sig_stat = sig[::stride] # Lightweight view for math
         
-        # Frequency
-        sig_env = np.abs(sig) - np.mean(np.abs(sig))
-        freqs, psd = welch(sig_env, fs, nperseg=fs*4)
+        kurt = kurtosis(sig_stat)
+        sig_env = np.abs(sig_stat) - np.mean(np.abs(sig_stat))
+        
+        # Fast Welch
+        freqs, psd = welch(sig_env, fs_stat, nperseg=int(fs_stat*4))
         valid_mask = freqs > 0.5 
         dom_freq = freqs[valid_mask][np.argmax(psd[valid_mask])] if np.sum(valid_mask) > 0 else 0.0
+        
+        # Fast Peak Finding
+        peaks, _ = find_peaks(sig_env, height=np.std(sig_env)*3, distance=int(fs_stat*0.4))
+        regularity = np.std(np.diff(peaks) / fs_stat) if len(peaks) > 3 else 10.0
 
-        # Regularity
-        peaks, _ = find_peaks(sig_env, height=np.std(sig_env)*3, distance=int(fs*0.4))
-        regularity = np.std(np.diff(peaks) / fs) if len(peaks) > 3 else 10.0
-
-        # Verdict
-        verdict = "Keep"
         if dom_freq > 12.0:
-            verdict = "HF NOISE"
             hf_noise.append(i)
-        elif (0.7 <= dom_freq <= 3.0) and (kurt > 1.5):
-            if regularity < 0.20:
-                verdict = "HEART"
-                hearts.append(i)
-            else:
-                verdict = "ARTIFACT" 
-                other_noise.append(i)
-        
-        print(f"{i:<4} | {dom_freq:<6.2f} | {kurt:<6.2f} | {regularity:<8.3f} | {verdict}")
-        
-    return hearts, hf_noise, other_noise
+            continue
+            
+        if (0.7 <= dom_freq <= 3.0) and (kurt > 1.5):
+            c_type = 'HEART' if regularity < 0.20 else 'ARTIFACT'
+            candidates.append({'id': i, 'kurt': kurt, 'type': c_type})
 
-def process_single_grid(raw_chunk, fs, grid_id):
-    """Runs the full cleaning pipeline on one 64-channel chunk."""
-    print(f"\n=== PROCESSING GRID {grid_id} ===")
+    candidates.sort(key=lambda x: x['kurt'], reverse=True)
+    final_hearts = []
+    final_artifacts = []
+    
+    for c in candidates:
+        if c['type'] == 'HEART':
+            if len(final_hearts) < MAX_HEART_COMPONENTS:
+                final_hearts.append(c['id'])
+        else:
+            final_artifacts.append(c['id'])
+
+    return final_hearts, hf_noise, final_artifacts
+
+def process_single_grid_wrapper(args):
+    """
+    Unpacks arguments for ProcessPoolExecutor mapping.
+    """
+    raw_chunk, fs, grid_id = args
+    print(f"[Core Task] Processing Grid {grid_id}...")
     
     filtered = filter_data(raw_chunk, fs)
     ica, sources = ICA(filtered)
     hearts, hf, artifacts = analyze_envelope_refined(sources, fs)
     bad_indices = hearts + hf + artifacts
-    # Zero out bad components
     sources[:, bad_indices] = 0.0
     
-    # Reconstruct & Envelope
     clean = ica.inverse_transform(sources)
     rectified = np.abs(clean)
-    
-    # 3Hz Lowpass for smooth heatmap visualization
     b_env, a_env = butter(N=4, Wn=3.0, btype='low', fs=fs)
     envelopes = filtfilt(b_env, a_env, rectified, axis=0)
     
-    # Reshape & Align (Column-Major Bottom-Up correction)
     grid_matrix = envelopes.reshape(-1, 8, 8).transpose(0, 2, 1)[:, ::-1, :]
     return grid_matrix
 
@@ -199,6 +212,7 @@ class EMGControlPanel:
         self.root = root
         self.root.title("sEMG Analysis Tool")
         self.root.geometry("550x680")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         self.fs = None
         self.sEMG_data = None
@@ -255,6 +269,10 @@ class EMGControlPanel:
         self.vis_btn = ttk.Button(root, text="Visualize Result", command=self.on_visualize, state="disabled")
         self.vis_btn.pack(pady=20, ipadx=10, ipady=5)
 
+    def on_closing(self):
+        self.root.destroy()
+        os._exit(0) # Force kill threads
+
     def browse_file(self):
         fpath = filedialog.askopenfilename(filetypes=[("MAT Files", "*.mat"), ("All Files", "*.*")])
         if fpath:
@@ -290,31 +308,41 @@ class EMGControlPanel:
         threading.Thread(target=self.run_processing_task, daemon=True).start()
 
     def run_processing_task(self):
-        self.proc_btn.config(state="disabled")
-        self.vis_btn.config(state="disabled")
-        self.proc_status_var.set("Status: Processing... Please wait...")
+        # Initial UI Update must be on main thread
+        self.root.after(0, lambda: self.proc_btn.config(state="disabled"))
+        self.root.after(0, lambda: self.vis_btn.config(state="disabled"))
+        self.root.after(0, lambda: self.proc_status_var.set("Status: Spawning parallel processes..."))
         
         try:
-            results = []
+            tasks = []
             for i in range(6):
                 start, end = i * 64, (i + 1) * 64
                 chunk = self.sEMG_data[:, start:end]
-                processed = process_single_grid(chunk, self.fs, grid_id=i+1)
-                results.append(processed)
+                tasks.append((chunk, self.fs, i+1))
+
+            results = [None] * 6
+            # Use ProcessPoolExecutor to bypass GIL
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                futures = executor.map(process_single_grid_wrapper, tasks)
+                results = list(futures)
+
             self.processed_cache = results
-            self.proc_status_var.set("Status: Processing Complete.")
-            self.proc_btn.config(text="Processing Done (Cached)")
+            
+            # Safe UI Update
+            self.root.after(0, lambda: self.proc_status_var.set("Status: Processing Complete."))
+            self.root.after(0, lambda: self.proc_btn.config(text="Processing Done (Cached)"))
+            
         except Exception as e:
-            print(e)
-            self.proc_status_var.set(f"Error: {e}")
+            print(f"Error: {e}")
+            self.root.after(0, lambda: self.proc_status_var.set(f"Error: {e}"))
         finally:
-            self.vis_btn.config(state="normal")
+            self.root.after(0, lambda: self.vis_btn.config(state="normal"))
 
     def on_visualize(self):
         threading.Thread(target=self.run_visualization_task, daemon=True).start()
 
     def run_visualization_task(self):
-        self.vis_btn.config(state="disabled")
+        self.root.after(0, lambda: self.vis_btn.config(state="disabled"))
         mode = self.signal_var.get()
         try:
             video_data = []
@@ -345,17 +373,19 @@ class EMGControlPanel:
                 vmax = None
                 print("Local Scale: Auto")
 
-            if target_grid_idx == -1:
-                visualize_torso_animation(video_data, self.fs, fps=30)
-            else:
-                grid_anim = video_data[target_grid_idx]
-                visualize_grid_animation_scaled(grid_anim, self.fs, fps=30, grid_idx=target_grid_idx, vmax=vmax)
-
+            self.root.after(0, lambda: self.visualize_animation(target_grid_idx, video_data, vmax))
         except Exception as e:
             print(e)
-            messagebox.showerror("Error", str(e))
+            self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
         finally:
-            self.vis_btn.config(state="normal")
+            self.root.after(0, lambda: self.vis_btn.config(state="normal"))
+
+    def visualize_animation(self, target_grid_idx, video_data, vmax):
+        if target_grid_idx == -1:
+            visualize_torso_animation(video_data, self.fs, fps=30)
+        else:
+            grid_anim = video_data[target_grid_idx]
+            visualize_grid_animation_scaled(grid_anim, self.fs, fps=30, grid_idx=target_grid_idx, vmax=vmax)
 
 if __name__ == "__main__":
     root = tk.Tk()
