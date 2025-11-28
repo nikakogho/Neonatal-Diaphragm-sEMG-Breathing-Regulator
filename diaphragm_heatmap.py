@@ -1,3 +1,7 @@
+import tkinter as tk
+from tkinter import ttk, filedialog
+import threading
+from tkinter import messagebox
 from matplotlib.animation import FuncAnimation
 import numpy as np
 import matplotlib.pyplot as plt
@@ -245,45 +249,146 @@ data = load_mat_any(file_path)
 sEMG = data['sEMG'].T # (63955, 384)
 fs = data['fsamp']
 
-original_signal = sEMG.reshape(-1, 8, 8, 6).transpose(3, 0, 2, 1)  # (Grids, Samples, Y, X)
+# GUI
+class EMGControlPanel:
+    def __init__(self, root):
+        self.root = root
+        self.fs = None
+        self.sEMG = None
+        self.filename = None
+        
+        self.root.title("sEMG Analysis Tool")
+        self.root.geometry("500x550")
+        
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        header = ttk.Label(root, text="Neonate sEMG Visualizer", font=("Segoe UI", 14, "bold"))
+        header.pack(pady=20)
+        
+        # 0. File Selection
+        file_frame = ttk.LabelFrame(root, text="Data File")
+        file_frame.pack(fill="x", padx=20, pady=5)
+        
+        self.file_lbl = ttk.Label(file_frame, text="No file selected", foreground="gray")
+        self.file_lbl.pack(side="left", padx=10, pady=10)
+        
+        ttk.Button(file_frame, text="Browse...", command=self.browse_file).pack(side="right", padx=10, pady=10)
+        
+        # 1. Signal Type
+        type_frame = ttk.LabelFrame(root, text="Signal Source")
+        type_frame.pack(fill="x", padx=20, pady=5)
+        
+        self.signal_var = tk.StringVar(value="processed")
+        ttk.Radiobutton(type_frame, text="Processed (Filtered + ICA)", 
+                        variable=self.signal_var, value="processed").pack(anchor="w", padx=10, pady=5)
+        ttk.Radiobutton(type_frame, text="Original (Raw Input)", 
+                        variable=self.signal_var, value="original").pack(anchor="w", padx=10, pady=5)
+        
+        # 2. Grid Selection
+        grid_frame = ttk.LabelFrame(root, text="Target Grid")
+        grid_frame.pack(fill="x", padx=20, pady=10)
+        
+        self.grid_var = tk.StringVar()
+        grids = ["Full Torso (All 6)", "Grid 1", "Grid 2", "Grid 3", "Grid 4", "Grid 5", "Grid 6"]
+        self.grid_combo = ttk.Combobox(grid_frame, textvariable=self.grid_var, values=grids, state="readonly")
+        self.grid_combo.current(0)
+        self.grid_combo.pack(fill="x", padx=10, pady=10)
+        
+        # 3. Action Button
+        self.btn = ttk.Button(root, text="Launch Visualization", command=self.on_launch)
+        self.btn.pack(pady=20, ipadx=10, ipady=5)
+        
+        # Status Label
+        self.status_var = tk.StringVar(value="Ready")
+        self.status_lbl = ttk.Label(root, textvariable=self.status_var, font=("Segoe UI", 9, "italic"))
+        self.status_lbl.pack(pady=5)
 
-def display_single_grid(grid_number, grid_data):
-    visualize_grid_animation(grid_data, fs, fps=30, grid_id=grid_number)
+    def browse_file(self):
+        fpath = filedialog.askopenfilename(filetypes=[("MAT Files", "*.mat"), ("All Files", "*.*")])
+        if fpath:
+            self.load_data(fpath)
 
-def display_full_torso(all_grids_video):
-    visualize_torso_animation(all_grids_video, fs, fps=30)
+    def load_data(self, fpath):
+        self.status_var.set("Loading data...")
+        self.root.update()
+        
+        data = load_mat_any(fpath)
+        if data and 'sEMG' in data:
+            self.sEMG = data['sEMG'].T # (Samples, 384)
+            self.fs = data['fsamp']
+            self.filename = os.path.basename(fpath)
+            
+            self.file_lbl.config(text=f"{self.filename} ({self.fs} Hz)", foreground="black")
+            self.status_var.set("Data Loaded. Ready.")
+            self.btn.config(state="normal")
+        else:
+            messagebox.showerror("Error", "Invalid .mat file. Must contain 'sEMG' and 'fsamp'.")
+            self.status_var.set("Load Failed")
 
-def calculate_single_grid(grid_number):
-    start = (grid_number - 1) * 64
-    end = grid_number * 64
-    grid_chunk = sEMG[:, start:end]
-    
-    # Process independent chunk
-    processed_grid = process_single_grid(grid_chunk, fs, grid_id=grid_number)
-    return processed_grid
+    def on_launch(self):
+        # Run in thread so UI doesn't freeze during calculation
+        threading.Thread(target=self.run_visualization, daemon=True).start()
 
-def calculate_all_grids():
-    all_grids_video = []
-    for i in range(6):
-        processed_grid = calculate_single_grid(i + 1)
-        all_grids_video.append(processed_grid)
-    return all_grids_video
+    def run_visualization(self):
+        self.btn.config(state="disabled")
+        self.status_var.set("Processing... Check Console...")
+        
+        try:
+            # Parse inputs
+            mode = self.signal_var.get()
+            selection = self.grid_combo.get()
+            
+            # Determine Grid ID (0 for All, 1-6 for specific)
+            if "Full Torso" in selection:
+                grid_id = 0
+            else:
+                grid_id = int(selection.split(" ")[1])
 
-original_or_processed = input('Enter Signal Type (1: Processed, 2: Original): ')
-grid_number = input('Enter Grid Number Or 0 For Full Torso: ')
+            # --- DATA PREPARATION ---
+            video_data = []
+            
+            # Loop needed to handle geometry correctly for both Raw and Processed
+            for i in range(6):
+                # Optimization: If user selected specific grid, only process that one
+                if grid_id != 0 and (i + 1) != grid_id:
+                    video_data.append(None) # Placeholder
+                    continue
 
-if original_or_processed == '1':
-    if grid_number == '0':
-        all_grids_video = calculate_all_grids()
-    else:
-        signal = calculate_single_grid(int(grid_number))
-elif original_or_processed == '2':
-    if grid_number == '0':
-        all_grids_video = original_signal
-    else:
-        signal = original_signal[int(grid_number) - 1]
+                start, end = i * 64, (i + 1) * 64
+                chunk = self.sEMG[:, start:end]
 
-if grid_number == '0':
-    display_full_torso(all_grids_video)
-else:
-    display_single_grid(int(grid_number), signal)
+                if mode == "processed":
+                    # Run full pipeline
+                    processed = process_single_grid(chunk, self.fs, grid_id=i+1)
+                    video_data.append(processed)
+                else:
+                    # Just reshape Raw data to match Anatomy (Flip/Transpose)
+                    # We utilize the same geometry fix we discovered earlier
+                    raw_geom = chunk.reshape(-1, 8, 8).transpose(0, 2, 1)[:, ::-1, :]
+                    video_data.append(raw_geom)
+
+            # --- DISPLAY ---
+            self.status_var.set("Rendering...")
+            
+            if grid_id == 0:
+                # Filter out Nones if we calculated all
+                visualize_torso_animation(video_data, self.fs, fps=30)
+            else:
+                # Extract the single grid we calculated
+                single_grid_data = video_data[grid_id - 1]
+                visualize_grid_animation(single_grid_data, self.fs, fps=30, grid_id=grid_id)
+
+            self.status_var.set("Visualization Complete")
+
+        except Exception as e:
+            print(e)
+            self.status_var.set(f"Error: {str(e)}")
+        finally:
+            self.btn.config(state="normal")
+
+if __name__ == "__main__":
+    print("Starting GUI...")
+    root = tk.Tk()
+    app = EMGControlPanel(root)
+    root.mainloop()
