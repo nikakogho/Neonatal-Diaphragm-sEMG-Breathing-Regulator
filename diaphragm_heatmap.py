@@ -24,10 +24,9 @@ def filter_data(data, fs):
     return data
 
 def ICA(data):
-    # pca_estimator = PCA(n_components=0.999, svd_solver='full')
-    # pca_estimator.fit(data)
-    # n_components = pca_estimator.n_components_
-    n_components = 35
+    pca_estimator = PCA(n_components=0.999, svd_solver='full')
+    pca_estimator.fit(data)
+    n_components = pca_estimator.n_components_
 
     ica = FastICA(n_components=n_components, random_state=42, whiten='unit-variance')
     sources = ica.fit_transform(data)  # Returns (Samples, Components)
@@ -35,8 +34,6 @@ def ICA(data):
     return ica, sources
 
 def analyze_envelope_refined(sources, fs):
-    MAX_HEART_COMPONENTS = 3
-    MAX_ARTIFACT_COMPONENT = 4
     hearts, hf_noise, other_noise = [], [], []
     print(f"{'ID':<4} | {'Freq':<6} | {'Kurt':<6} | {'Reg (s)':<8} | {'Verdict'}")
     print("-" * 50)
@@ -64,10 +61,10 @@ def analyze_envelope_refined(sources, fs):
             verdict = "HF NOISE"
             hf_noise.append(i)
         elif (0.7 <= dom_freq <= 3.0) and (kurt > 1.5):
-            if regularity < 0.20 and len(hearts) < MAX_HEART_COMPONENTS:
+            if regularity < 0.20:
                 verdict = "HEART"
                 hearts.append(i)
-            elif len(other_noise) < MAX_ARTIFACT_COMPONENT:
+            else:
                 verdict = "ARTIFACT" 
                 other_noise.append(i)
         
