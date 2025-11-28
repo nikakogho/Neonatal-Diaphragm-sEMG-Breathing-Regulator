@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import scipy.io as sio
 from scipy.stats import kurtosis
 from scipy.signal import iirnotch, filtfilt, butter, find_peaks, welch
-from sklearn.decomposition import FastICA
+from sklearn.decomposition import FastICA, PCA
 import os
 
 def load_mat_any(path):
@@ -24,7 +24,11 @@ def filter_data(data, fs):
     return data
 
 def ICA(data):
-    ica = FastICA(n_components=15, random_state=42, whiten='unit-variance')
+    pca_estimator = PCA(n_components=0.999, svd_solver='full')
+    pca_estimator.fit(data)
+    n_components = pca_estimator.n_components_
+
+    ica = FastICA(n_components=n_components, random_state=42, whiten='unit-variance')
     sources = ica.fit_transform(data)  # Returns (Samples, Components)
 
     return ica, sources
