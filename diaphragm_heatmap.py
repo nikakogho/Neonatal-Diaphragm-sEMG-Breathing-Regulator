@@ -24,9 +24,10 @@ def filter_data(data, fs):
     return data
 
 def ICA(data):
-    pca_estimator = PCA(n_components=0.999, svd_solver='full')
-    pca_estimator.fit(data)
-    n_components = pca_estimator.n_components_
+    # pca_estimator = PCA(n_components=0.999, svd_solver='full')
+    # pca_estimator.fit(data)
+    # n_components = pca_estimator.n_components_
+    n_components = 35
 
     ica = FastICA(n_components=n_components, random_state=42, whiten='unit-variance')
     sources = ica.fit_transform(data)  # Returns (Samples, Components)
@@ -101,7 +102,32 @@ def process_single_grid(raw_chunk, fs, grid_id):
     envelopes = filtfilt(b_env, a_env, rectified, axis=0)
     
     # 6. Reshape (Samples, 8, 8)
-    return envelopes.reshape(-1, 8, 8)
+    envelopes = envelopes.reshape(-1, 8, 8)
+
+    # 7. Align to match anatomical layout of starting bottom-left and moving up first
+    envelopes = envelopes.transpose(0, 2, 1)[:, ::-1, :]
+
+    return envelopes
+
+def _add_grid_overlay(ax):
+    """Adds 1-8 numbering and grid lines to an axis."""
+    # 1. Major Ticks (The Numbers 1-8) centered on pixels
+    ax.set_xticks(np.arange(8))
+    ax.set_yticks(np.arange(8))
+    ax.set_xticklabels(np.arange(1, 9))
+    ax.set_yticklabels(np.arange(8, 0, -1))
+    
+    # 2. Minor Ticks (The Grid Lines) between pixels
+    # We place them at -0.5, 0.5, 1.5, etc.
+    ax.set_xticks(np.arange(-0.5, 8, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, 8, 1), minor=True)
+    
+    # 3. Draw the Grid
+    # alpha=0.3 makes it subtle so it doesn't obscure the data
+    ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
+    
+    # 4. Remove the little tick marks sticking out
+    ax.tick_params(which='both', length=0)
 
 def visualize_full_torso_one_frame_at_a_time(all_grids_video, fs, frames_to_show):
     """Plots 6 grids side-by-side with a shared color scale."""
@@ -113,15 +139,14 @@ def visualize_full_torso_one_frame_at_a_time(all_grids_video, fs, frames_to_show
         plt.suptitle(f"Full Torso Activation - Frame {t} ({t/fs:.2f}s)", fontsize=16)
         
         for i in range(6):
-            plt.subplot(2, 3, i+1) # 2 Rows, 3 Columns
+            ax = plt.subplot(2, 3, i+1) # 2 Rows, 3 Columns
             
             plt.imshow(all_grids_video[i][t], cmap='magma', 
                        interpolation='bicubic', origin='upper', 
                        vmin=0, vmax=global_max)
             
-            plt.colorbar(fraction=0.046, pad=0.04)
+            _add_grid_overlay(ax)
             plt.title(f"Grid {i+1}")
-            plt.axis('off')
 
         plt.tight_layout()
         plt.show()
@@ -147,8 +172,8 @@ def visualize_torso_animation(all_grids_video, fs, fps=30):
         im = ax.imshow(all_grids_video[i][0], cmap='magma', 
                        interpolation='bicubic', origin='upper', 
                        vmin=0, vmax=global_max)
+        _add_grid_overlay(ax)
         ax.set_title(f"Grid {i+1}")
-        ax.axis('off')
         images.append(im)
     
     # Add a main title for the time
@@ -191,9 +216,9 @@ def visualize_grid_animation(grid_data, fs, fps=30, grid_id=1):
     # Initial Plot
     im = ax.imshow(grid_data[0], cmap='magma', interpolation='bicubic', 
                    origin='upper', vmin=0, vmax=vmax)
+    _add_grid_overlay(ax)
     plt.colorbar(im, ax=ax)
     title = ax.set_title(f"Grid {grid_id} - Time: 0.00s")
-    ax.axis('off')
 
     # Calculate Step Size
     # We have fs samples per second. We want fps frames per second.
@@ -223,21 +248,45 @@ data = load_mat_any(file_path)
 sEMG = data['sEMG'].T # (63955, 384)
 fs = data['fsamp']
 
-all_grids_video = []
+original_signal = sEMG.reshape(-1, 8, 8, 6).transpose(3, 0, 2, 1)  # (Grids, Samples, Y, X)
 
-# Loop through all 6 grids
-for i in range(6):
-    start = i * 64
-    end = (i + 1) * 64
+def display_single_grid(grid_number, grid_data):
+    visualize_grid_animation(grid_data, fs, fps=30, grid_id=grid_number)
+
+def display_full_torso(all_grids_video):
+    visualize_torso_animation(all_grids_video, fs, fps=30)
+
+def calculate_single_grid(grid_number):
+    start = (grid_number - 1) * 64
+    end = grid_number * 64
     grid_chunk = sEMG[:, start:end]
     
-    # Process independent chunks
-    processed_grid = process_single_grid(grid_chunk, fs, grid_id=i+1)
-    all_grids_video.append(processed_grid)
+    # Process independent chunk
+    processed_grid = process_single_grid(grid_chunk, fs, grid_id=grid_number)
+    return processed_grid
 
-#print("\nGenerating Torso Maps...")
-## Visualize Frames 2000, 2500, 3000 (adjust as needed)
-#visualize_full_torso(all_grids_video, fs, frames_to_show=[2000, 2500, 3000])
+def calculate_all_grids():
+    all_grids_video = []
+    for i in range(6):
+        processed_grid = calculate_single_grid(i + 1)
+        all_grids_video.append(processed_grid)
+    return all_grids_video
 
-#grid1anim = visualize_grid_animation(all_grids_video[0], fs, fps=30, grid_id=1)
-anim = visualize_torso_animation(all_grids_video, fs, fps=30)
+original_or_processed = input('Enter Signal Type (1: Processed, 2: Original): ')
+grid_number = input('Enter Grid Number Or 0 For Full Torso: ')
+
+if original_or_processed == '1':
+    if grid_number == '0':
+        all_grids_video = calculate_all_grids()
+    else:
+        signal = calculate_single_grid(int(grid_number))
+elif original_or_processed == '2':
+    if grid_number == '0':
+        all_grids_video = original_signal
+    else:
+        signal = original_signal[int(grid_number) - 1]
+
+if grid_number == '0':
+    display_full_torso(all_grids_video)
+else:
+    display_single_grid(int(grid_number), signal)
