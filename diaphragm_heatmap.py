@@ -29,7 +29,7 @@ def ICA(data):
     n_components = pca_estimator.n_components_
 
     ica = FastICA(n_components=n_components, random_state=42, whiten='unit-variance')
-    sources = ica.fit_transform(data)  # Returns (Samples, Components)
+    sources = ica.fit_transform(data) # Returns (Samples, Components)
 
     return ica, sources
 
