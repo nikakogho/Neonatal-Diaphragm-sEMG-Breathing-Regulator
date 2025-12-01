@@ -104,18 +104,15 @@ def analyze_envelope_refined(sources, fs):
 
     return final_hearts, hf_noise, final_artifacts
 
-def process_single_grid_wrapper(args):
-    """Parallel wrapper"""
-    raw_chunk, fs, grid_id = args
-    print(f"[Core Task] Processing Grid {grid_id}...")
+def reconstruct_heatmap(ica, sources, bad_indices, fs):
+    """
+    Helper to reconstruct heatmap from sources without re-running ICA.
+    """
+    # Copy sources to avoid modifying the cached original
+    sources_clean = sources.copy()
+    sources_clean[:, bad_indices] = 0.0
     
-    filtered = filter_data(raw_chunk, fs)
-    ica, sources = ICA(filtered)
-    hearts, hf, artifacts = analyze_envelope_refined(sources, fs)
-    bad_indices = hearts + hf + artifacts
-    sources[:, bad_indices] = 0.0
-    
-    clean = ica.inverse_transform(sources)
+    clean = ica.inverse_transform(sources_clean)
     rectified = np.abs(clean)
     b_env, a_env = butter(N=4, Wn=3.0, btype='low', fs=fs)
     envelopes = filtfilt(b_env, a_env, rectified, axis=0)
@@ -123,6 +120,30 @@ def process_single_grid_wrapper(args):
     # Geometry Fix
     grid_matrix = envelopes.reshape(-1, 8, 8).transpose(0, 2, 1)[:, ::-1, :]
     return grid_matrix
+
+def process_single_grid_wrapper(args):
+    """
+    Parallel wrapper. Returns full state (ICA object + Sources) for caching.
+    """
+    raw_chunk, fs, grid_id = args
+    print(f"[Core Task] Processing Grid {grid_id}...")
+    
+    filtered = filter_data(raw_chunk, fs)
+    ica, sources = ICA(filtered)
+    hearts, hf, artifacts = analyze_envelope_refined(sources, fs)
+    bad_indices = hearts + hf + artifacts
+    
+    # Generate initial view
+    heatmap = reconstruct_heatmap(ica, sources, bad_indices, fs)
+    
+    # Return everything needed for editing later
+    return {
+        'grid_id': grid_id,
+        'heatmap': heatmap,
+        'ica_model': ica,
+        'sources': sources,
+        'bad_indices': bad_indices
+    }
 
 # ==========================================
 #        COMPONENT INSPECTOR WINDOW
@@ -162,20 +183,38 @@ class ComponentEditor(tk.Toplevel):
         self.plot_components()
 
     def plot_components(self):
-        cols = 5
+        cols = 2
         rows = int(np.ceil(self.n_components / cols))
-        fig = Figure(figsize=(15, 2.5 * rows), dpi=100)
+        
+        fig = Figure(figsize=(12, 1.5 * rows), dpi=100)
         self.axes = []
         
-        # Plot only first 4 seconds to save render time
-        limit = min(int(4 * self.fs), self.sources.shape[0])
+        limit_sec = 4.0
+        limit_samples = int(limit_sec * self.fs)
+        limit = min(limit_samples, self.sources.shape[0])
+        
+        time_vec = np.arange(limit) / self.fs # Time in seconds
         
         for i in range(self.n_components):
             ax = fig.add_subplot(rows, cols, i+1)
-            ax.plot(self.sources[:limit, i], linewidth=0.8, color='black')
-            ax.set_title(f"Comp {i}", fontsize=9)
-            ax.set_xticks([])
-            ax.set_yticks([])
+            
+            # Plot Data
+            ax.plot(time_vec, self.sources[:limit, i], linewidth=1.0, color='#2c3e50')
+            
+            # Styling to match request
+            ax.set_title(f"Component {i}", fontsize=10, loc='left', pad=2)
+            ax.grid(True, linestyle='--', alpha=0.6)
+            ax.set_xlim(0, limit_sec)
+            
+            # Only labels on bottom row to save space
+            if i >= (self.n_components - cols):
+                ax.set_xlabel("Time (s)", fontsize=8)
+            else:
+                ax.set_xticklabels([])
+                
+            ax.set_ylabel("Amp", fontsize=8)
+            ax.tick_params(axis='both', which='major', labelsize=8)
+            
             self.update_plot_color(ax, i)
             self.axes.append(ax)
 
@@ -186,7 +225,8 @@ class ComponentEditor(tk.Toplevel):
         self.canvas_agg.mpl_connect('button_press_event', self.on_click)
 
     def update_plot_color(self, ax, idx):
-        color = '#ffcccc' if idx in self.bad_indices else '#ccffcc'
+        # Light Red for bad, Light Green for good
+        color = '#ffebee' if idx in self.bad_indices else '#e8f5e9'
         ax.set_facecolor(color)
 
     def on_click(self, event):
@@ -212,7 +252,10 @@ def _add_grid_overlay(ax):
     ax.set_yticks(np.arange(8))
     ax.set_xticklabels(np.arange(1, 9))
     ax.set_yticklabels(np.arange(8, 0, -1)) 
-    ax.tick_params(which='both', length=0) # Hide tick marks, keep numbers
+    ax.set_xticks(np.arange(-0.5, 8, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, 8, 1), minor=True)
+    ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
+    ax.tick_params(which='both', length=0)
 
 def _create_grid_lines(ax):
     breaks = np.arange(0.5, 7.5, 1)
@@ -321,7 +364,8 @@ class EMGControlPanel:
         self.fs = None
         self.sEMG_data = None
         self.raw_cache = None 
-        self.processed_cache = None
+        # Grid States: List of dicts {heatmap, ica_model, sources, bad_indices}
+        self.grid_states = [None] * 6 
 
         style = ttk.Style()
         style.theme_use('clam')
@@ -356,6 +400,7 @@ class EMGControlPanel:
         self.grid_combo.current(0)
         self.grid_combo.pack(fill="x", padx=10, pady=5)
         
+        # Inspector Button
         self.inspect_btn = ttk.Button(vis_frame, text="Inspect & Edit Components", command=self.on_inspect, state="disabled")
         self.inspect_btn.pack(fill="x", padx=10, pady=10)
         
@@ -374,7 +419,7 @@ class EMGControlPanel:
 
     def on_closing(self):
         self.root.destroy()
-        os._exit(0) # Force kill threads
+        os._exit(0)
 
     def browse_file(self):
         fpath = filedialog.askopenfilename(filetypes=[("MAT Files", "*.mat"), ("All Files", "*.*")])
@@ -389,7 +434,7 @@ class EMGControlPanel:
         if data and 'sEMG' in data:
             self.sEMG_data = data['sEMG'].T
             self.fs = data['fsamp']
-            self.processed_cache = None
+            self.grid_states = [None] * 6
             self.raw_cache = []
             
             print("Pre-calculating raw geometry...")
@@ -402,7 +447,7 @@ class EMGControlPanel:
             self.file_lbl.config(text=f"{os.path.basename(fpath)} ({self.fs} Hz)", foreground="black")
             self.proc_btn.config(state="normal", text="Run Auto-Processing")
             self.vis_btn.config(state="normal")
-            self.inspect_btn.config(state="disabled") # Can't inspect until we select a grid
+            self.inspect_btn.config(state="disabled")
             self.proc_status_var.set("Status: Raw data ready.")
         else:
             messagebox.showerror("Error", "Invalid .mat file")
@@ -411,7 +456,6 @@ class EMGControlPanel:
         threading.Thread(target=self.run_processing_task, daemon=True).start()
 
     def run_processing_task(self):
-        # Initial UI Update must be on main thread
         self.root.after(0, lambda: self.proc_btn.config(state="disabled"))
         self.root.after(0, lambda: self.vis_btn.config(state="disabled"))
         self.root.after(0, lambda: self.proc_status_var.set("Status: Spawning parallel processes..."))
@@ -428,7 +472,7 @@ class EMGControlPanel:
                 futures = executor.map(process_single_grid_wrapper, tasks)
                 results = list(futures)
 
-            self.processed_cache = results
+            self.grid_states = results
             
             self.root.after(0, lambda: self.proc_status_var.set("Status: Processing Complete."))
             self.root.after(0, lambda: self.proc_btn.config(text="Processing Done (Cached)"))
@@ -448,40 +492,29 @@ class EMGControlPanel:
             return
         
         grid_id = int(selection.split(":")[0].split(" ")[1])
-        threading.Thread(target=self.run_inspection_task, args=(grid_id,), daemon=True).start()
+        
+        # Check Cache
+        state = self.grid_states[grid_id - 1]
+        if state is None:
+            messagebox.showwarning("No Data", "Please run processing first.")
+            return
 
-    def run_inspection_task(self, grid_id):
-        self.root.after(0, lambda: self.proc_status_var.set(f"Status: Analyzing Grid {grid_id} components..."))
-        
-        # We must re-run ICA locally to get sources (not cached to save RAM)
-        start, end = (grid_id-1) * 64, grid_id * 64
-        chunk = self.sEMG_data[:, start:end]
-        
-        filtered = filter_data(chunk, self.fs)
-        ica, sources = ICA(filtered)
-        hearts, hf, artifacts = analyze_envelope_refined(sources, self.fs)
-        auto_bad = hearts + hf + artifacts
-        
-        # Open Window on Main Thread
-        self.root.after(0, lambda: ComponentEditor(self.root, sources, self.fs, auto_bad, 
-                                                   f"Grid {grid_id}", 
-                                                   lambda bad: self.apply_manual_edit(grid_id, ica, sources, bad)))
+        # Open Editor immediately (Data is already in RAM)
+        ComponentEditor(self.root, state['sources'], self.fs, state['bad_indices'], 
+                        f"Grid {grid_id}", 
+                        lambda bad: self.apply_manual_edit(grid_id, bad))
 
-    def apply_manual_edit(self, grid_id, ica, sources, bad_indices):
-        # Callback from Editor: Re-construct and Update Cache
-        print(f"Applying manual edits to Grid {grid_id}. Removing {len(bad_indices)} components.")
-        sources[:, bad_indices] = 0.0
-        clean = ica.inverse_transform(sources)
-        rectified = np.abs(clean)
-        b_env, a_env = butter(N=4, Wn=3.0, btype='low', fs=self.fs)
-        envelopes = filtfilt(b_env, a_env, rectified, axis=0)
+    def apply_manual_edit(self, grid_id, bad_indices):
+        state = self.grid_states[grid_id - 1]
         
-        # Geometry
-        new_heatmap = envelopes.reshape(-1, 8, 8).transpose(0, 2, 1)[:, ::-1, :]
+        print(f"Reconstructing Grid {grid_id} with new bad indices: {bad_indices}")
+        
+        # Use Helper to reconstruct quickly without running ICA again
+        new_heatmap = reconstruct_heatmap(state['ica_model'], state['sources'], bad_indices, self.fs)
         
         # Update Cache
-        if self.processed_cache is None: self.processed_cache = [None]*6
-        self.processed_cache[grid_id-1] = new_heatmap
+        state['heatmap'] = new_heatmap
+        state['bad_indices'] = bad_indices
         
         self.proc_status_var.set(f"Status: Grid {grid_id} Updated Manually.")
 
@@ -497,10 +530,11 @@ class EMGControlPanel:
             if mode == "original":
                 video_data = self.raw_cache
             else:
-                if self.processed_cache is None:
+                if self.grid_states[0] is None:
                     self.root.after(0, lambda: messagebox.showwarning("Wait", "Please run processing first."))
                     return 
-                video_data = self.processed_cache
+                # Extract just the heatmaps from the state objects
+                video_data = [state['heatmap'] for state in self.grid_states]
 
             selection = self.grid_combo.get()
             scale_mode = self.scale_var.get()
