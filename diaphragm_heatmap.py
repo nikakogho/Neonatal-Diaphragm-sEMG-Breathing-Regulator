@@ -4,7 +4,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import scipy.io as sio
-from scipy.stats import kurtosis
+from scipy.stats import kurtosis, iqr
 from scipy.signal import iirnotch, filtfilt, butter, find_peaks, welch
 from sklearn.decomposition import FastICA, PCA
 import os
@@ -58,9 +58,10 @@ def ICA(data):
 
 def analyze_envelope_refined(sources, fs):
     """
-    Returns lists of indices: hearts, hf_noise, artifacts
+    Uses Median/IQR (Interquartile Range).
+    This adapts to 'States' (Relaxed vs Heavy Breathing) automatically.
     """
-    MAX_HEART_COMPONENTS = 6
+    MAX_HEART_COMPONENTS = 3
     candidates = []
     hf_noise = []
     
@@ -69,20 +70,36 @@ def analyze_envelope_refined(sources, fs):
     
     for i in range(sources.shape[1]):
         sig = sources[:, i]
-        sig_stat = sig[::stride] # Lightweight view for math
+        sig_stat = sig[::stride]
         
+        # 1. Robust Shape (Kurtosis is already scale-invariant)
         kurt = kurtosis(sig_stat)
-        sig_env = np.abs(sig_stat) - np.mean(np.abs(sig_stat))
         
-        # Fast Welch
+        # 2. Robust Envelope
+        # Use Median to find the "Floor"
+        # Rectify relative to median to handle baseline drift
+        sig_env = np.abs(sig_stat - np.median(sig_stat))
+        
+        # 3. Frequency Analysis
         freqs, psd = welch(sig_env, fs_stat, nperseg=int(fs_stat*4))
         valid_mask = freqs > 0.5 
         dom_freq = freqs[valid_mask][np.argmax(psd[valid_mask])] if np.sum(valid_mask) > 0 else 0.0
         
-        # Fast Peak Finding
-        peaks, _ = find_peaks(sig_env, height=np.std(sig_env)*3, distance=int(fs_stat*0.4))
+        # 4. Robust Peak Finding (The "State" Handler)
+        # Calculate IQR (Interquartile Range) - measure of statistical dispersion
+        # This expands during heavy breathing (high noise) and shrinks during rest.
+        signal_iqr = iqr(sig_env)
+        floor = np.median(sig_env)
+        
+        # Threshold: Floor + 3 * IQR (Standard Outlier Detection)
+        # If breathing is heavy, IQR is huge -> Threshold rises -> We ignore small noise.
+        peak_thresh = floor + 3 * signal_iqr
+        
+        peaks, _ = find_peaks(sig_env, height=peak_thresh, distance=int(fs_stat*0.4))
         regularity = np.std(np.diff(peaks) / fs_stat) if len(peaks) > 3 else 10.0
 
+        # --- CLASSIFICATION ---
+        
         if dom_freq > 12.0:
             hf_noise.append(i)
             continue
