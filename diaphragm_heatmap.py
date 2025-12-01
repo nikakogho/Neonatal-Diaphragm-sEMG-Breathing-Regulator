@@ -129,77 +129,130 @@ def process_single_grid_wrapper(args):
 #        FRONTEND: VISUALIZATION
 # ==========================================
 
-def _add_grid_overlay(ax):
+def _setup_axis_labels(ax):
+    """Sets up the 1-8 numbering on the axes (Static Background)."""
     ax.set_xticks(np.arange(8))
     ax.set_yticks(np.arange(8))
     ax.set_xticklabels(np.arange(1, 9))
-    ax.set_yticklabels(np.arange(8, 0, -1))
-    ax.set_xticks(np.arange(-0.5, 8, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, 8, 1), minor=True)
-    ax.grid(which='minor', color='white', linestyle='-', linewidth=0.5, alpha=0.5)
-    ax.tick_params(which='both', length=0)
+    ax.set_yticklabels(np.arange(8, 0, -1)) 
+    ax.tick_params(which='both', length=0) # Hide tick marks, keep numbers
+
+def _create_grid_lines(ax):
+    """
+    Creates manual grid lines that can be passed to the animator.
+    Returns a list of LineCollection artists.
+    """
+    # Grid lines go between pixels (indices -0.5, 0.5, 1.5, etc.)
+    # We want lines at 0.5, 1.5, ... 6.5
+    breaks = np.arange(0.5, 7.5, 1)
+    
+    # Create Vertical and Horizontal lines
+    # colors='white', linewidth=0.5, alpha=0.5
+    v_lines = ax.vlines(breaks, -0.5, 7.5, colors='white', linewidth=0.5, alpha=0.5)
+    h_lines = ax.hlines(breaks, -0.5, 7.5, colors='white', linewidth=0.5, alpha=0.5)
+    
+    return [v_lines, h_lines]
 
 def visualize_torso_animation(all_grids_video, fs, fps=30):
     print("Generating Anatomical Torso Animation...")
-    # 3 Rows (Chest, Ribs, Abs), 2 Columns (Right, Left)
+    
+    step = int(fs / fps)
+    downsampled_grids = [g[::step] for g in all_grids_video]
+    total_frames = len(downsampled_grids[0])
+    
     fig, axes = plt.subplots(3, 2, figsize=(9, 12))
+    global_max = np.percentile(np.array(downsampled_grids), 99.0)
     
-    global_max = np.percentile(np.array(all_grids_video), 99.0)
-    images = []
+    # Store all artists that need updating/redrawing
+    animated_artists = [] 
+    images = [] # Just the images for easy data updating
     
-    # Place grids according to GRID_CONFIG
     for idx, conf in GRID_CONFIG.items():
         row, col = conf['pos']
         ax = axes[row, col]
         
-        im = ax.imshow(all_grids_video[idx][0], cmap='magma', 
-                       interpolation='bicubic', origin='upper', 
-                       vmin=0, vmax=global_max)
-        _add_grid_overlay(ax)
+        # 1. Setup Static Labels (Background)
+        _setup_axis_labels(ax)
         ax.set_title(f"Grid {idx+1}: {conf['name']}", fontsize=10)
         
-        # Store (ImageArtist, GridIndex) to update correctly
+        # 2. Create Image (Animated)
+        im = ax.imshow(downsampled_grids[idx][0], cmap='magma', 
+                       interpolation='bicubic', origin='upper', 
+                       vmin=0, vmax=global_max)
+        
+        # 3. Create Grid Lines (Animated Overlay)
+        # We MUST create them here and add them to the list so they are drawn ON TOP of the image
+        grid_lines = _create_grid_lines(ax)
+        
         images.append((im, idx))
+        
+        # Add Image AND Lines to the list of things to redraw
+        animated_artists.append(im)
+        animated_artists.extend(grid_lines)
     
-    time_text = fig.suptitle("Time: 0.00s", fontsize=16)
-    step = int(fs / fps)
-    total_frames = len(all_grids_video[0])
+    # HUD Text
+    ref_ax = axes[0, 0]
+    time_text = ref_ax.text(0.05, 0.9, "Time: 0.00s", 
+                            transform=ref_ax.transAxes, 
+                            color='white', fontsize=12, fontweight='bold',
+                            bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+    animated_artists.append(time_text)
     
     def update(frame_idx):
+        # Update Data
         for im_obj, grid_idx in images:
-            im_obj.set_data(all_grids_video[grid_idx][frame_idx])
-        time_text.set_text(f"Time: {frame_idx/fs:.2f}s")
-        return [img[0] for img in images] + [time_text]
+            im_obj.set_data(downsampled_grids[grid_idx][frame_idx])
+            
+        time_text.set_text(f"Time: {frame_idx * step / fs:.2f}s")
+        
+        # Return EVERYTHING (Images + Grid Lines + Text)
+        # Matplotlib will redraw them in this order: Image first, then Lines on top
+        return animated_artists
 
-    anim = FuncAnimation(fig, update, frames=range(0, total_frames, step), 
-                         interval=1000/fps, blit=False)
+    anim = FuncAnimation(fig, update, frames=total_frames, 
+                         interval=1000/fps, blit=True, cache_frame_data=False)
     plt.tight_layout()
     plt.show()
     return anim
 
 def visualize_grid_animation_scaled(grid_data, fs, fps=30, grid_idx=0, vmax=None):
-    # Get Label Name
     name = GRID_CONFIG[grid_idx]['name']
-    print(f"Generating Animation for {name} with max={vmax if vmax else 'Auto'}...")
+    print(f"Generating Animation for {name}...")
+    
+    step = int(fs / fps)
+    downsampled_data = grid_data[::step]
+    total_frames = len(downsampled_data)
     
     fig, ax = plt.subplots(figsize=(6, 6))
-    if vmax is None: vmax = np.percentile(grid_data, 99.5)
+    if vmax is None: vmax = np.percentile(downsampled_data, 99.5)
     
-    im = ax.imshow(grid_data[0], cmap='magma', interpolation='bicubic', 
+    _setup_axis_labels(ax)
+    ax.set_title(f"{name}")
+    
+    # Image
+    im = ax.imshow(downsampled_data[0], cmap='magma', interpolation='bicubic', 
                    origin='upper', vmin=0, vmax=vmax)
-    _add_grid_overlay(ax)
     plt.colorbar(im, ax=ax)
-    title = ax.set_title(f"{name} - Time: 0.00s")
-
-    step = int(fs / fps)
+    
+    # Grid Lines (Overlay)
+    grid_lines = _create_grid_lines(ax)
+    
+    # Text
+    time_text = ax.text(0.05, 0.93, "Time: 0.00s", 
+                        transform=ax.transAxes, 
+                        color='white', fontsize=12, fontweight='bold',
+                        bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+    
+    # Combine all animated parts
+    all_artists = [im, time_text] + grid_lines
     
     def update(frame_idx):
-        im.set_data(grid_data[frame_idx])
-        title.set_text(f"{name} - Time: {frame_idx/fs:.2f}s")
-        return [im, title]
+        im.set_data(downsampled_data[frame_idx])
+        time_text.set_text(f"Time: {frame_idx * step / fs:.2f}s")
+        return all_artists
 
-    anim = FuncAnimation(fig, update, frames=range(0, len(grid_data), step), 
-                         interval=1000/fps, blit=False)
+    anim = FuncAnimation(fig, update, frames=total_frames, 
+                         interval=1000/fps, blit=True, cache_frame_data=False)
     plt.show()
     return anim
 
