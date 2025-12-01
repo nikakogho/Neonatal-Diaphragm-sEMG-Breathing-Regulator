@@ -61,7 +61,7 @@ def analyze_envelope_refined(sources, fs):
     Uses Median/IQR (Interquartile Range).
     This adapts to 'States' (Relaxed vs Heavy Breathing) automatically.
     """
-    MAX_HEART_COMPONENTS = 3
+    MAX_HEART_COMPONENTS = 6
     candidates = []
     hf_noise = []
     
