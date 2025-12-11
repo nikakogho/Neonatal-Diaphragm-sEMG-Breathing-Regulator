@@ -13,9 +13,9 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 import concurrent.futures
 
-# ==========================================
+
 #        CONFIGURATION & MAPPING
-# ==========================================
+
 
 GRID_CONFIG = {
     0: {"name": "IN 1 (Right Chest)",   "pos": (0, 0)},
@@ -26,9 +26,9 @@ GRID_CONFIG = {
     5: {"name": "IN 5 (Left Chest)",    "pos": (0, 1)},
 }
 
-# ==========================================
+
 #        BACKEND: SIGNAL PROCESSING
-# ==========================================
+
 
 def load_mat_any(path):
     try:
@@ -197,9 +197,9 @@ def process_single_grid_wrapper(args):
         'bad_indices': bad_indices
     }
 
-# ==========================================
+
 #        WINDOWS & VIEWERS
-# ==========================================
+
 
 class RawSignalViewer(tk.Toplevel):
     def __init__(self, parent, data, fs, grid_name, start_time=0.0):
@@ -331,9 +331,9 @@ class ComponentEditor(tk.Toplevel):
         self.callback(list(self.bad_indices))
         self.destroy()
 
-# ==========================================
+
 #        FRONTEND: VISUALIZATION
-# ==========================================
+
 
 def _add_grid_overlay(ax):
     ax.set_xticks(np.arange(8))
@@ -436,9 +436,9 @@ def visualize_grid_animation_scaled(grid_data, fs, fps=30, grid_idx=0, vmax=None
     plt.show()
     return anim
 
-# ==========================================
+
 #        GUI CONTROLLER
-# ==========================================
+
 
 class EMGControlPanel:
     def __init__(self, root):
