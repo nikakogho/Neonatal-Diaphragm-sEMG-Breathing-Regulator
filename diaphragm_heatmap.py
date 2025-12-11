@@ -6,7 +6,7 @@ from matplotlib.figure import Figure
 import scipy.io as sio
 from scipy.stats import kurtosis, iqr
 from scipy.signal import iirnotch, filtfilt, butter, find_peaks, welch
-from sklearn.decomposition import FastICA, PCA
+from sklearn.decomposition import FastICA
 import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -159,12 +159,16 @@ def detect_bad_electrodes(filtered_grid, fs):
 
     return sorted(bad_indices)
 
-def ICA(data):
-    n_components = 20
+def ICA(data, downsampled):
+    n_components = 16
     ica = FastICA(n_components=n_components, random_state=42, 
                   whiten='unit-variance', max_iter=1000, tol=0.005)
-    sources = ica.fit_transform(data)
-    return ica, sources
+    ica.fit(downsampled)
+
+    sources_downsampled = ica.transform(downsampled)
+    sources_full_res = ica.transform(data)
+
+    return ica, sources_downsampled, sources_full_res
 
 def detect_global_heartbeats(sEMG, fs):
     """
@@ -353,17 +357,27 @@ def process_single_grid_wrapper(args):
                   f"running ICA on all channels instead.")
             bad_electrodes = []  # don't exclude them in this extreme case
 
+    # 3.0) Downsample for ICA
+    ds_stride = 2 if fs >= 1600 else 1
+
+    if ds_stride > 1:
+        filtered_ds = filtered_for_ica[::ds_stride, :]
+        fs_ds = fs / ds_stride
+    else:
+        filtered_ds = filtered_for_ica
+        fs_ds = fs
+
     # 3) ICA only on good channels (or all if good_mask is None)
-    ica, sources = ICA(filtered_for_ica)
+    ica, sources_downsampled, sources_full_res = ICA(filtered_for_ica, filtered_ds)
 
     # 4) Component classification
-    hearts, hf, artifacts = analyze_envelope_refined(sources, fs, global_heart_peaks)
+    hearts, hf, artifacts = analyze_envelope_refined(sources_downsampled, fs_ds, global_heart_peaks)
     bad_components = hearts + hf + artifacts
 
     # 5) Reconstruct to full 8x8 grid, zeroing bad electrodes in the clean signal
     heatmap, clean_signal = reconstruct_heatmap(
         ica,
-        sources,
+        sources_full_res,
         bad_components,
         fs,
         good_mask=good_mask,
@@ -375,7 +389,7 @@ def process_single_grid_wrapper(args):
         'heatmap': heatmap,            # For Heatmap Viz (8x8 envelopes over time)
         'clean_signal': clean_signal,  # For Time Series Viz (bad electrodes = 0)
         'ica_model': ica,
-        'sources': sources,
+        'sources': sources_full_res,
         'bad_indices': bad_components, # bad ICA components
         'bad_electrodes': bad_electrodes,
         'good_mask': good_mask,
