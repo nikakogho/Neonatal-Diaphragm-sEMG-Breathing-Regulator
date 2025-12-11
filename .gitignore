@@ -19,3 +19,6 @@ Participant_1/
 Results/
 *.png
 *.jpg
+
+.venv
+venv
