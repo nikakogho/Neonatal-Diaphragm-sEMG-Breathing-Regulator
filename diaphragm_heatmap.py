@@ -47,6 +47,118 @@ def filter_data(data, fs):
     data = filtfilt(b_band, a_band, data, axis=0)
     return data
 
+def detect_bad_electrodes(filtered_grid, fs):
+    """
+    Detect obviously bad electrodes in a single 8x8 grid.
+
+    Strategy:
+      - Always flag clearly flat channels (almost no RMS).
+      - Flag channels that are MUCH louder than their immediate neighbors.
+      - Flag channels that are strong global amplitude outliers AND decorrelated
+        from their immediate neighbors.
+      - Additionally, if there are a few *extremely* loud outliers, mark them
+        bad outright (they will dominate ICA otherwise).
+    """
+    x = np.asarray(filtered_grid)
+    n_samples, n_channels = x.shape
+    assert n_channels == 64, "Expected 64 channels per grid."
+
+    # -------- 1) RMS-based checks (flat + global outliers) --------
+    rms = np.sqrt(np.mean(x**2, axis=0))  # (64,)
+    med_rms = np.median(rms)
+    mad_rms = np.median(np.abs(rms - med_rms)) + 1e-12  # robust scale
+
+    # Definitely flat (dead / detached electrodes)
+    too_flat = np.where(rms < 0.03 * med_rms)[0]   # <3% of median RMS
+
+    # Globally loud (candidate for badness)
+    z_rms = (rms - med_rms) / mad_rms
+    global_loud = np.where(z_rms > 4.0)[0]         # >4 MAD above median
+
+    # EXTREMELY loud outliers: auto-bad if they are few
+    EXTREME_Z = 7.0          # very strong outliers in z-score
+    EXTREME_MULT = 8.0       # or >8x median RMS
+    extremely_loud = np.where(
+        (z_rms > EXTREME_Z) | (rms > EXTREME_MULT * med_rms)
+    )[0]
+
+    bad_indices = set(too_flat.tolist())
+
+    # If only a handful of channels are absurdly loud, treat them as bad outright
+    MAX_EXTREME_PER_GRID = 5
+    if 0 < len(extremely_loud) <= MAX_EXTREME_PER_GRID:
+        bad_indices.update(extremely_loud.tolist())
+
+    # -------- neighbor utility --------
+    def neighbors(idx):
+        """Return indices of up/down/left/right neighbors in the 8x8 layout."""
+        r = idx // 8   # 0..7
+        c = idx % 8    # 0..7
+        neigh = []
+        if r > 0: neigh.append((r - 1) * 8 + c)
+        if r < 7: neigh.append((r + 1) * 8 + c)
+        if c > 0: neigh.append(r * 8 + (c - 1))
+        if c < 7: neigh.append(r * 8 + (c + 1))
+        return neigh
+
+    # -------- 2) Local amplitude ratio: much louder than neighbors --------
+    LOCAL_RATIO_THRESH = 3.0  # >3x neighbor median RMS
+
+    for ch in range(n_channels):
+        if ch in bad_indices:
+            continue  # already bad (flat or extreme)
+
+        neigh = neighbors(ch)
+        if not neigh:
+            continue
+
+        neigh_rms = rms[neigh]
+        neigh_rms = neigh_rms[neigh_rms > 0]
+        if len(neigh_rms) == 0:
+            continue
+
+        local_med = np.median(neigh_rms)
+        if local_med <= 0:
+            continue
+
+        if rms[ch] > LOCAL_RATIO_THRESH * local_med:
+            bad_indices.add(ch)
+            continue
+
+    # -------- 3) Global loud + decorrelated from neighbors --------
+    CORR_THRESH = 0.2  # very low median correlation
+
+    for ch in global_loud:
+        if ch in bad_indices:
+            continue  # already flagged
+
+        sig = x[:, ch]
+        if np.std(sig) < 1e-9:
+            continue
+
+        neigh = neighbors(ch)
+        if not neigh:
+            continue
+
+        corrs = []
+        for n in neigh:
+            sig_n = x[:, n]
+            if np.std(sig_n) < 1e-9:
+                continue
+            c = np.corrcoef(sig, sig_n)[0, 1]
+            if np.isfinite(c):
+                corrs.append(c)
+
+        if not corrs:
+            continue
+
+        median_corr = np.median(corrs)
+
+        if median_corr < CORR_THRESH:
+            bad_indices.add(ch)
+
+    return sorted(bad_indices)
+
 def ICA(data):
     n_components = 20
     ica = FastICA(n_components=n_components, random_state=42, 
@@ -157,52 +269,123 @@ def analyze_envelope_refined(sources, fs, global_heart_peaks=None):
 
     return final_hearts, hf_noise, final_artifacts
 
-def reconstruct_heatmap(ica, sources, bad_indices, fs):
-    """Reconstructs 'Clean' signal and 'Heatmap' envelope."""
+def reconstruct_heatmap(ica, sources, bad_indices, fs, good_mask=None, n_channels=64):
+    """
+    Reconstructs 'Clean' signal and 'Heatmap' envelope.
+
+    Parameters
+    ----------
+    ica : FastICA
+        Fitted ICA model.
+    sources : np.ndarray
+        Shape (n_samples, n_components), ICA sources.
+    bad_indices : list[int]
+        Source indices to zero out (heart, noise, artifacts).
+    fs : float
+        Sampling frequency.
+    good_mask : np.ndarray[bool] or None
+        If not None, boolean mask of length n_channels indicating which
+        channels were used in ICA (True = used, False = bad electrode).
+        If None, we assume ICA was run on all channels and no expansion
+        is required.
+    n_channels : int
+        Total number of channels in the grid (default 64).
+
+    Returns
+    -------
+    grid_matrix : np.ndarray
+        Shape (n_time, 8, 8) envelope values for heatmap.
+    clean_signal : np.ndarray
+        Shape (n_samples, n_channels), reconstructed clean signals.
+        Bad electrodes are set to 0 if good_mask is provided.
+    """
     sources_clean = sources.copy()
-    sources_clean[:, bad_indices] = 0.0
-    
-    # Reconstruct Time Series (The Clean Signal)
-    clean_signal = ica.inverse_transform(sources_clean)
-    
-    # Calculate Heatmap (Rectified + Enveloped)
+    if bad_indices:
+        sources_clean[:, bad_indices] = 0.0
+
+    # Reconstruct only the channels that ICA knows about
+    clean_subset = ica.inverse_transform(sources_clean)  # (n_samples, n_used)
+
+    if good_mask is None:
+        # Old behavior: ICA was run on all channels
+        clean_signal = clean_subset
+    else:
+        # Expand back to full 64-channel layout
+        clean_signal = np.zeros((clean_subset.shape[0], n_channels), dtype=clean_subset.dtype)
+        clean_signal[:, good_mask] = clean_subset
+        # Bad electrodes remain 0.0 everywhere → effectively ignored downstream
+
+    # Envelope & geometry
     rectified = np.abs(clean_signal)
     b_env, a_env = butter(N=4, Wn=3.0, btype='low', fs=fs)
     envelopes = filtfilt(b_env, a_env, rectified, axis=0)
-    
-    # Geometry
+
+    # This assumes 64 channels = 8x8 layout
     grid_matrix = envelopes.reshape(-1, 8, 8).transpose(0, 2, 1)[:, ::-1, :]
-    
+
     return grid_matrix, clean_signal
 
 def process_single_grid_wrapper(args):
     """Parallel Worker."""
     raw_chunk, fs, grid_id, global_heart_peaks = args
     print(f"[Core Task] Processing Grid {grid_id}...")
-    
-    filtered = filter_data(raw_chunk, fs)
-    ica, sources = ICA(filtered)
-    
+
+    # 1) Classic filtering (notch + 20–400 Hz bandpass)
+    filtered = filter_data(raw_chunk, fs)  # (n_samples, 64)
+
+    # 2) Detect bad electrodes on filtered data
+    bad_electrodes = detect_bad_electrodes(filtered, fs)
+    print(f"Grid {grid_id}: {len(bad_electrodes)} / 64 electrodes flagged bad.")
+
+    good_mask = None
+    filtered_for_ica = filtered
+
+    if len(bad_electrodes) > 0:
+        mask = np.ones(filtered.shape[1], dtype=bool)
+        mask[bad_electrodes] = False
+
+        # Require at least a few good channels; otherwise, fall back to using all
+        if np.sum(mask) >= 5:
+            good_mask = mask
+            filtered_for_ica = filtered[:, good_mask]
+        else:
+            print(f"[Warning] Grid {grid_id}: too many channels flagged bad; "
+                  f"running ICA on all channels instead.")
+            bad_electrodes = []  # don't exclude them in this extreme case
+
+    # 3) ICA only on good channels (or all if good_mask is None)
+    ica, sources = ICA(filtered_for_ica)
+
+    # 4) Component classification
     hearts, hf, artifacts = analyze_envelope_refined(sources, fs, global_heart_peaks)
-    bad_indices = hearts + hf + artifacts
-    
-    heatmap, clean_signal = reconstruct_heatmap(ica, sources, bad_indices, fs)
-    
+    bad_components = hearts + hf + artifacts
+
+    # 5) Reconstruct to full 8x8 grid, zeroing bad electrodes in the clean signal
+    heatmap, clean_signal = reconstruct_heatmap(
+        ica,
+        sources,
+        bad_components,
+        fs,
+        good_mask=good_mask,
+        n_channels=filtered.shape[1]
+    )
+
     return {
         'grid_id': grid_id,
-        'heatmap': heatmap,       # For Heatmap Viz
-        'clean_signal': clean_signal, # For Time Series Viz
+        'heatmap': heatmap,            # For Heatmap Viz (8x8 envelopes over time)
+        'clean_signal': clean_signal,  # For Time Series Viz (bad electrodes = 0)
         'ica_model': ica,
         'sources': sources,
-        'bad_indices': bad_indices
+        'bad_indices': bad_components, # bad ICA components
+        'bad_electrodes': bad_electrodes,
+        'good_mask': good_mask,
     }
-
 
 #        WINDOWS & VIEWERS
 
 
 class RawSignalViewer(tk.Toplevel):
-    def __init__(self, parent, data, fs, grid_name, start_time=0.0):
+    def __init__(self, parent, data, fs, grid_name, start_time=0.0, bad_channels=None):
         super().__init__(parent)
         self.title(f"Time Series: {grid_name}")
         self.geometry("1400x900")
@@ -210,6 +393,7 @@ class RawSignalViewer(tk.Toplevel):
         self.fs = fs
         self.start_time = start_time
         self.n_channels = data.shape[1]
+        self.bad_channels = set(bad_channels) if bad_channels is not None else set()
         
         self.main_frame = ttk.Frame(self)
         self.main_frame.pack(fill="both", expand=True)
@@ -229,23 +413,28 @@ class RawSignalViewer(tk.Toplevel):
         cols = 4
         rows = int(np.ceil(self.n_channels / cols))
         fig = Figure(figsize=(15, 1.2 * rows), dpi=100)
-        
-        # Data passed is already sliced to the correct time window
+
         n_samples = self.data.shape[0]
-        # Create time vector starting from the selected start time
         time_vec = np.arange(n_samples) / self.fs + self.start_time
-        
+
         for i in range(self.n_channels):
             ax = fig.add_subplot(rows, cols, i+1)
-            ax.plot(time_vec, self.data[:, i], linewidth=0.8, color='#34495e')
-            ax.set_title(f"Ch {i+1}", fontsize=8, loc='left', pad=1)
+
+            is_bad = i in self.bad_channels
+            color = '#e74c3c' if is_bad else '#34495e'
+            title_suffix = " (BAD)" if is_bad else ""
+
+            ax.plot(time_vec, self.data[:, i], linewidth=0.8, color=color)
+            ax.set_title(f"Ch {i+1}{title_suffix}", fontsize=8, loc='left', pad=1)
             ax.grid(True, linestyle=':', alpha=0.5)
             ax.set_xlim(time_vec[0], time_vec[-1])
-            
-            # Show X Ticks (Timestamps) and Y Ticks (Amplitude) for EVERY chart
+
+            # Show ticks for all charts
             ax.tick_params(axis='x', labelsize=6)
             ax.tick_params(axis='y', labelsize=6)
-            ax.set_facecolor('#f8f9fa')
+
+            # Background color indicates status
+            ax.set_facecolor('#ffebee' if is_bad else '#f8f9fa')
 
         fig.tight_layout()
         canvas = FigureCanvasTkAgg(fig, master=self.scrollable_frame)
@@ -351,7 +540,37 @@ def _create_grid_lines(ax):
     h_lines = ax.hlines(breaks, -0.5, 7.5, colors='white', linewidth=0.5, alpha=0.5)
     return [v_lines, h_lines]
 
-def visualize_torso_animation(all_grids_video, fs, fps=30, start_s=0.0):
+def _add_bad_electrode_markers(ax, bad_electrodes):
+    """
+    Draw red X markers over bad electrodes in an 8x8 grid.
+
+    bad_electrodes: iterable of channel indices (0..63)
+    """
+    if not bad_electrodes:
+        return []
+
+    lines = []
+    for ch in bad_electrodes:
+        # Map channel index to (row, col) in final geometry.
+        # Original mapping: reshape(..., 8, 8).transpose(0,2,1)[:, ::-1, :]
+        # That yields:
+        #   final_row = 7 - (ch % 8)
+        #   final_col = ch // 8
+        row = 7 - (ch % 8)
+        col = ch // 8
+
+        # Draw an X spanning the cell from (col-0.5, row-0.5) to (col+0.5, row+0.5)
+        l1, = ax.plot([col - 0.5, col + 0.5],
+                      [row - 0.5, row + 0.5],
+                      color='red', linewidth=1.5)
+        l2, = ax.plot([col - 0.5, col + 0.5],
+                      [row + 0.5, row - 0.5],
+                      color='red', linewidth=1.5)
+        lines.extend([l1, l2])
+
+    return lines
+
+def visualize_torso_animation(all_grids_video, fs, fps=30, start_s=0.0, bad_electrodes_by_grid=None):
     print("Generating Anatomical Torso Animation...")
     step = int(fs / fps)
     # Downsample first
@@ -379,6 +598,12 @@ def visualize_torso_animation(all_grids_video, fs, fps=30, start_s=0.0):
         images.append((im, idx))
         animated_artists.append(im)
         animated_artists.extend(lines)
+
+        bad_for_this = None
+        if bad_electrodes_by_grid is not None and idx < len(bad_electrodes_by_grid):
+            bad_for_this = bad_electrodes_by_grid[idx]
+        marker_lines = _add_bad_electrode_markers(ax, bad_for_this)
+        animated_artists.extend(marker_lines)
     
     ref_ax = axes[0, 0]
     time_text = ref_ax.text(0.05, 0.9, f"Time: {start_s:.2f}s", 
@@ -400,7 +625,7 @@ def visualize_torso_animation(all_grids_video, fs, fps=30, start_s=0.0):
     plt.show()
     return anim
 
-def visualize_grid_animation_scaled(grid_data, fs, fps=30, grid_idx=0, vmax=None, start_s=0.0):
+def visualize_grid_animation_scaled(grid_data, fs, fps=30, grid_idx=0, vmax=None, start_s=0.0, bad_electrodes=None):
     name = GRID_CONFIG[grid_idx]['name']
     print(f"Generating Animation for {name}...")
     
@@ -419,11 +644,13 @@ def visualize_grid_animation_scaled(grid_data, fs, fps=30, grid_idx=0, vmax=None
     plt.colorbar(im, ax=ax)
     
     lines = _create_grid_lines(ax)
-    time_text = ax.text(0.05, 0.93, f"Time: {start_s:.2f}s", 
+    marker_lines = _add_bad_electrode_markers(ax, bad_electrodes)
+
+    time_text = ax.text(0.05, 0.93, f"Time: {start_s:.2f}s",
                         transform=ax.transAxes, color='white', fontweight='bold',
                         bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
-    
-    all_artists = [im, time_text] + lines
+
+    all_artists = [im, time_text] + lines + marker_lines
     
     def update(frame_idx):
         im.set_data(downsampled_data[frame_idx])
@@ -612,8 +839,12 @@ class EMGControlPanel:
             self.root.after(0, lambda: self.inspect_btn.config(state="normal"))
             
         except Exception as e:
-            print(f"Error: {e}")
-            self.root.after(0, lambda: self.proc_status_var.set(f"Error: {e}"))
+            error_msg = str(e)  # capture it in a normal variable
+            print(f"Error: {error_msg}")
+            self.root.after(
+                0,
+                lambda msg=error_msg: self.proc_status_var.set(f"Error: {msg}")
+            )
         finally:
             self.root.after(0, lambda: self.vis_btn.config(state="normal"))
 
@@ -638,8 +869,14 @@ class EMGControlPanel:
     def apply_manual_edit(self, grid_id, bad_indices):
         state = self.grid_states[grid_id - 1]
         print(f"Reconstructing Grid {grid_id} with new bad indices: {bad_indices}")
-        heatmap, clean_signal = reconstruct_heatmap(state['ica_model'], state['sources'], bad_indices, self.fs)
-        state['heatmap'] = heatmap
+        heatmap, clean_signal = reconstruct_heatmap(
+            state['ica_model'],
+            state['sources'],
+            bad_indices,
+            self.fs,
+            good_mask=state.get('good_mask'),
+            n_channels=64
+        )
         state['clean_signal'] = clean_signal
         state['bad_indices'] = bad_indices
         self.proc_status_var.set(f"Status: Grid {grid_id} Updated Manually.")
@@ -692,7 +929,22 @@ class EMGControlPanel:
                 
                 # Launch Viewer (Safe on main thread)
                 title = f"Grid {target_grid_idx+1} ({mode.capitalize()})"
-                self.root.after(0, lambda: RawSignalViewer(self.root, signal_slice, self.fs, title, start_time=start_s))
+                bad_channels = None
+                state = self.grid_states[target_grid_idx] if self.grid_states[target_grid_idx] is not None else None
+                if state is not None and 'bad_electrodes' in state:
+                    bad_channels = state['bad_electrodes']
+
+                self.root.after(
+                    0,
+                    lambda: RawSignalViewer(
+                        self.root,
+                        signal_slice,
+                        self.fs,
+                        title,
+                        start_time=start_s,
+                        bad_channels=bad_channels
+                    )
+                )
                 return # Done
 
             # BRANCH 2: Heatmap Animation
@@ -726,11 +978,21 @@ class EMGControlPanel:
             self.root.after(0, lambda: self.vis_btn.config(state="normal"))
 
     def launch_plot(self, target_idx, data, vmax, start_s):
+        # Prepare bad electrode info (if processing has been run)
+        bad_electrodes_by_grid = None
+        if self.grid_states[0] is not None:
+            bad_electrodes_by_grid = []
+            for state in self.grid_states:
+                if state is not None and 'bad_electrodes' in state:
+                    bad_electrodes_by_grid.append(state['bad_electrodes'])
+                else:
+                    bad_electrodes_by_grid.append([])
+
         if target_idx == -1:
-            visualize_torso_animation(data, self.fs, fps=30, start_s=start_s)
+            visualize_torso_animation(data, self.fs, fps=30, start_s=start_s, bad_electrodes_by_grid=bad_electrodes_by_grid)
         else:
             grid_anim = data[target_idx]
-            visualize_grid_animation_scaled(grid_anim, self.fs, fps=30, grid_idx=target_idx, vmax=vmax, start_s=start_s)
+            visualize_grid_animation_scaled(grid_anim, self.fs, fps=30, grid_idx=target_idx, vmax=vmax, start_s=start_s, bad_electrodes=bad_electrodes_by_grid[target_idx])
 
 if __name__ == "__main__":
     import multiprocessing
