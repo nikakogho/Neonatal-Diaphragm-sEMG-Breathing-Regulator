@@ -160,7 +160,12 @@ def detect_bad_electrodes(filtered_grid, fs):
     return sorted(bad_indices)
 
 def ICA(data, downsampled):
-    n_components = 16
+    max_components = 16
+    n_timestamps = downsampled.shape[0]
+    n_electrodes = downsampled.shape[1]
+    
+    n_components = min(max_components, n_timestamps, n_electrodes)
+
     ica = FastICA(n_components=n_components, random_state=42, 
                   whiten='unit-variance', max_iter=1000, tol=0.005)
     ica.fit(downsampled)
@@ -273,7 +278,7 @@ def analyze_envelope_refined(sources, fs, global_heart_peaks=None):
 
     return final_hearts, hf_noise, final_artifacts
 
-def reconstruct_heatmap(ica, sources, bad_indices, fs, good_mask=None, n_channels=64):
+def reconstruct_heatmap(ica, sources, bad_ICA_components, bad_electrodes, fs, good_mask=None, n_channels=64):
     """
     Reconstructs 'Clean' signal and 'Heatmap' envelope.
 
@@ -283,8 +288,10 @@ def reconstruct_heatmap(ica, sources, bad_indices, fs, good_mask=None, n_channel
         Fitted ICA model.
     sources : np.ndarray
         Shape (n_samples, n_components), ICA sources.
-    bad_indices : list[int]
+    bad_ICA_components : list[int]
         Source indices to zero out (heart, noise, artifacts).
+    bad_electrodes : list[int]
+        Electrode indices to zero out in the final signal.
     fs : float
         Sampling frequency.
     good_mask : np.ndarray[bool] or None
@@ -304,8 +311,8 @@ def reconstruct_heatmap(ica, sources, bad_indices, fs, good_mask=None, n_channel
         Bad electrodes are set to 0 if good_mask is provided.
     """
     sources_clean = sources.copy()
-    if bad_indices:
-        sources_clean[:, bad_indices] = 0.0
+    if bad_ICA_components:
+        sources_clean[:, bad_ICA_components] = 0.0
 
     # Reconstruct only the channels that ICA knows about
     clean_subset = ica.inverse_transform(sources_clean)  # (n_samples, n_used)
@@ -317,7 +324,9 @@ def reconstruct_heatmap(ica, sources, bad_indices, fs, good_mask=None, n_channel
         # Expand back to full 64-channel layout
         clean_signal = np.zeros((clean_subset.shape[0], n_channels), dtype=clean_subset.dtype)
         clean_signal[:, good_mask] = clean_subset
-        # Bad electrodes remain 0.0 everywhere → effectively ignored downstream
+
+    if bad_electrodes:
+        clean_signal[:, bad_electrodes] = 0.0
 
     # Envelope & geometry
     rectified = np.abs(clean_signal)
@@ -355,7 +364,9 @@ def process_single_grid_wrapper(args):
         else:
             print(f"[Warning] Grid {grid_id}: too many channels flagged bad; "
                   f"running ICA on all channels instead.")
-            bad_electrodes = []  # don't exclude them in this extreme case
+            good_mask = None
+            filtered_for_ica = filtered
+            # keep bad electrodes as is
 
     # 3.0) Downsample for ICA
     ds_stride = 2 if fs >= 1600 else 1
@@ -379,6 +390,7 @@ def process_single_grid_wrapper(args):
         ica,
         sources_full_res,
         bad_components,
+        bad_electrodes,
         fs,
         good_mask=good_mask,
         n_channels=filtered.shape[1]
@@ -887,12 +899,14 @@ class EMGControlPanel:
             state['ica_model'],
             state['sources'],
             bad_indices,
+            state['bad_electrodes'],
             self.fs,
             good_mask=state.get('good_mask'),
             n_channels=64
         )
         state['clean_signal'] = clean_signal
         state['bad_indices'] = bad_indices
+        state['heatmap'] = heatmap
         self.proc_status_var.set(f"Status: Grid {grid_id} Updated Manually.")
 
     # --- VISUALIZATION ---
