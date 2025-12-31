@@ -4,7 +4,7 @@ This repository contains the code for my bachelor thesis project on **surface EM
 
 The long-term goal of the project is to help build a **real-time, adaptive ventilator control system** that can:
 
-* Read sEMG from the diaphragm via a high-density (8×8) electrode grid array.
+* Read sEMG from the diaphragm via 6 high-density (8×8) electrode grid arrays.
 * Infer **breathing effort / breathing difficulty** from the cleaned signals.
 * Output **suggestions to increase or decrease ventilator pressure** to avoid under-assistance (dyspnea) or over-assistance (lung injury).
 
@@ -520,88 +520,12 @@ The next stages of the thesis will:
 
 The roadmap is split into phases so I can tick items as I complete them.
 
-### Phase 1 — Data Cleaning & Visualization (Current Step)
+### Phase 1 - Preprocessing (Leave Only Diaphragm Signal)
+- Removes dead channels
+- Remvoes heart signal
+- Removes noise
 
-* [ ] Document the dataset (subjects, recording protocol, electrode placement, sampling rates) in a separate `DATA.md`.
-* [ ] Add command-line entry point (headless version) to run the full cleaning pipeline and export results without the GUI.
-* [ ] Add options in the GUI to:
-
-  * [ ] Save cleaned signals and heatmaps to `.mat` or `.npz` for further analysis.
-  * [ ] Export current visualization frames for use as thesis figures.
-* [ ] Implement basic sanity checks:
-
-  * [ ] Check that channel count is 384 (6×64) and warn otherwise.
-  * [ ] Check that global heart detection returns a plausible heart rate for the given recording.
-* [ ] Add logging instead of only `print` for reproducibility and debugging.
-
-### Phase 2 — Feature Engineering & Breathing Difficulty Metrics
-
-* [ ] Implement **breath segmentation** (detecting inspiratory cycles) using cleaned diaphragm envelopes:
-
-  * [ ] Start from 1D global features (e.g., torso-summed envelope) to detect breaths.
-  * [ ] Optionally use heart peaks to avoid misclassifying cardiac artifacts as breaths.
-* [ ] Define and compute **per-breath features**, e.g.:
-
-  * [ ] RMS amplitude per grid.
-  * [ ] Total diaphragm activation (sum over all grids).
-  * [ ] Spatial “center of activity” (COM of envelope over the torso).
-  * [ ] Frequency-domain measures (e.g. power in specific bands).
-* [ ] Visualize these features over time and across subjects/recordings.
-* [ ] Propose a first version of a scalar **“Breathing Difficulty Index”** (BDI) based on the feature set.
-
-### Phase 3 — Ventilator Pressure Suggestion Logic (Offline)
-
-* [ ] Collect or define labels (or proxy criteria) for **“too low”, “appropriate”, “too high”** ventilator support intervals (even if approximate).
-* [ ] Prototype a **rule-based mapping**:
-
-  * [ ] From the BDI and its trend (rising/falling) to “increase / keep / decrease” pressure recommendations.
-* [ ] Implement an **offline simulation loop**:
-
-  * [ ] Replay cleaned sEMG data.
-  * [ ] Apply pressure suggestion rules.
-  * [ ] Track hypothetical breathing difficulty over time under different policies.
-* [ ] Evaluate different rule sets qualitatively (plots, case studies) and quantitatively (e.g. reduce time spent in “extreme difficulty” states).
-
-### Phase 4 — Real-Time Prototype & Optimization
-
-* [ ] Abstract data input to allow streaming:
-
-  * [ ] Replace `.mat` loading with a generator or callback interface for real-time samples.
-* [ ] Profile computational cost of:
-
-  * [ ] Filtering,
-  * [ ] ICA per grid,
-  * [ ] Envelope computation.
-* [ ] Investigate optimizations:
-
-  * [ ] Windowed / sliding-window ICA or other dimensionality reduction instead of full-record ICA.
-  * [ ] Reducing the number of components or channels if necessary.
-* [ ] Design a **proof-of-concept real-time pipeline**:
-
-  * [ ] Target latency per update (e.g. < 100–200 ms).
-  * [ ] Simulate real-time behavior using recorded data.
-
-### Phase 5 — Thesis Documentation & Deliverables
-
-* [ ] Write the **Methods** chapter around this pipeline (filters, ICA, heart detection, artifact logic, visualization).
-* [ ] Generate high-quality figures:
-
-  * [ ] Before/after ICA cleaning (single channel and grid-level).
-  * [ ] Torso heatmap snapshots over a few breaths.
-  * [ ] Example component plots (heart vs artifact vs diaphragm).
-* [ ] Describe and justify parameter choices:
-
-  * [ ] Filter bands (20–400 Hz, 10–100 Hz, 3 Hz envelope).
-  * [ ] ICA component count and thresholds (kurtosis, capture rate, frequency ranges).
-* [ ] Write the **Results** section for:
-
-  * [ ] Artifact removal quality (qualitative and, if possible, SNR-like metrics).
-  * [ ] Stability of heart detection and component classification across recordings.
-* [ ] Write the **Discussion & Future Work** section, including:
-
-  * [ ] Limitations of using ICA and rule-based logic.
-  * [ ] Potential improvements (deep learning, adaptive filtering, etc.).
-  * [ ] Path towards integration with actual ventilator hardware.
+### Phase 2 - CNN to predict what air pump value should be
 
 ---
 
