@@ -1013,19 +1013,23 @@ class EMGControlPanel:
         stride = self.fs // export_hz
         fs_export = self.fs / stride
 
-        # Collect EMG (time, grid, ch)
+        # Collect EMG in 8x8 geometry: (time, grid, 8, 8)
         grid_slices = []
-        bad_mask = np.zeros((6, 64), dtype=bool)
+        bad_mask_grid = np.zeros((6, 8, 8), dtype=bool)
 
         for gi, state in enumerate(self.grid_states):
-            sig = state['clean_signal']  # (n_samples, 64)
-            grid_slices.append(sig[start_idx:end_idx:stride])
+            sig = state["clean_signal"]                 # (n_samples, 64)
+            sig_win = sig[start_idx:end_idx:stride]     # (n_t, 64)
 
-            bad = state.get('bad_electrodes', [])
-            if bad:
-                bad_mask[gi, bad] = True
+            sig_grid = sig_win.reshape(-1, 8, 8).transpose(0, 2, 1)[:, ::-1, :]  # (n_t, 8, 8)
+            grid_slices.append(sig_grid)
 
-        emg_export = np.stack(grid_slices, axis=1)  # (n_t, 6, 64)
+            for ch in state.get("bad_electrodes", []):
+                r = 7 - (ch % 8)
+                c = ch // 8
+                bad_mask_grid[gi, r, c] = True
+
+        emg_export = np.stack(grid_slices, axis=1)  # (n_t, 6, 8, 8)
 
         # AUX (device) aligned by sample index, if present
         aux_export = None
@@ -1052,14 +1056,17 @@ class EMGControlPanel:
             "window_end_s": float(end_s),
             "n_samples_export": int(emg_export.shape[0]),
             "emg_shape": list(emg_export.shape),
+            "bad_mask_shape": list(bad_mask_grid.shape),
             "aux_shape": (list(aux_export.shape) if aux_export is not None else None),
+            "emg_format": "emg_grid (n_t, 6, 8, 8) using reshape+transpose+flip mapping",
+            "bad_mask_format": "bad_mask_grid (6, 8, 8) in same final grid coords"
         }
 
         np.savez_compressed(
             out_path,
-            emg=emg_export,          # (n_t, 6, 64)
+            emg=emg_export,          # (n_t, 6, 8, 8)
             aux=(aux_export if aux_export is not None else np.empty((0, 0))),
-            bad_mask=bad_mask,       # (6, 64) bool
+            bad_mask=bad_mask_grid,       # (6, 8, 8) bool
             time_s=time_s,           # (n_t,)
             meta=json.dumps(meta)
         )
