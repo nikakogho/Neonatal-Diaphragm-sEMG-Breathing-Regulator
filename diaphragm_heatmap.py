@@ -10,12 +10,9 @@ from sklearn.decomposition import FastICA
 import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import json
 import threading
 import concurrent.futures
-
-
-#        CONFIGURATION & MAPPING
-
 
 GRID_CONFIG = {
     0: {"name": "IN 1 (Right Chest)",   "pos": (0, 0)},
@@ -27,9 +24,7 @@ GRID_CONFIG = {
 }
 
 
-#        BACKEND: SIGNAL PROCESSING
-
-
+# BACKEND: SIGNAL PROCESSING
 def load_mat_any(path):
     try:
         d = sio.loadmat(path, squeeze_me=True, struct_as_record=False)
@@ -706,6 +701,8 @@ class EMGControlPanel:
         self.grid_states = [None] * 6 
         self.global_heart_peaks = None
         self.total_duration = 0.0
+        self.aux_data = None
+        self.loaded_file = None
 
         style = ttk.Style()
         style.theme_use('clam')
@@ -741,7 +738,7 @@ class EMGControlPanel:
         self.grid_combo.pack(fill="x", padx=10, pady=5)
         
         # Inspection Button
-        self.inspect_btn = ttk.Button(vis_frame, text="Inspect & Edit Components", command=self.on_inspect, state="disabled")
+        self.inspect_btn = ttk.Button(vis_frame, text="Inspect & Edit Components", command=self.on_inspect_grid_ICA_components, state="disabled")
         self.inspect_btn.pack(fill="x", padx=10, pady=10)
         
         # Source Selection
@@ -772,8 +769,19 @@ class EMGControlPanel:
         self.end_scale = tk.Scale(time_frame, from_=0, to=100, orient="horizontal", label="End Time", command=self.on_time_change)
         self.end_scale.pack(fill="x", padx=10)
         
-        self.vis_btn = ttk.Button(root, text="Visualize Result", command=self.on_visualize, state="disabled")
-        self.vis_btn.pack(pady=20, ipadx=10, ipady=5)
+        btn_row = ttk.Frame(root)
+        btn_row.pack(pady=(10, 15))
+
+        self.vis_btn = ttk.Button(btn_row, text="Visualize Result", command=self.on_visualize, state="disabled")
+        self.vis_btn.pack(side="left", padx=(0, 12), ipadx=10, ipady=5)
+
+        self.export_btn = ttk.Button(
+            btn_row,
+            text=f"📤 Export Processed Window...",
+            command=self.on_export,
+            state="disabled"
+        )
+        self.export_btn.pack(side="left", padx=(12, 0), ipadx=10, ipady=5)
 
     def on_closing(self):
         self.root.destroy()
@@ -789,35 +797,53 @@ class EMGControlPanel:
         self.root.update()
         
         data = load_mat_any(fpath)
-        if data and 'sEMG' in data:
-            self.sEMG_data = data['sEMG'].T
-            self.fs = data['fsamp']
-            self.grid_states = [None] * 6
-            self.raw_cache = []
-            self.global_heart_peaks = None
-            
-            # Update Time Sliders
-            self.total_duration = self.sEMG_data.shape[0] / self.fs
-            self.start_scale.config(to=self.total_duration)
-            self.end_scale.config(to=self.total_duration)
-            self.start_scale.set(0)
-            self.end_scale.set(self.total_duration)
-            
-            print("Pre-calculating raw geometry...")
-            for i in range(6):
-                start, end = i * 64, (i + 1) * 64
-                chunk = self.sEMG_data[:, start:end]
-                raw_geom = chunk.reshape(-1, 8, 8).transpose(0, 2, 1)[:, ::-1, :]
-                self.raw_cache.append(np.abs(raw_geom))
-            
-            self.file_lbl.config(text=f"{os.path.basename(fpath)} ({self.fs} Hz)", foreground="black")
-            self.proc_btn.config(state="normal", text="Run Auto-Processing")
-            self.vis_btn.config(state="normal")
-            self.inspect_btn.config(state="disabled")
-            self.proc_status_var.set("Status: Raw data ready.")
-        else:
+        if not (data and 'sEMG' in data):
             messagebox.showerror("Error", "Invalid .mat file")
+            return
+        
+        self.sEMG_data = data['sEMG'].T
+        self.fs = data['fsamp']
+        self.grid_states = [None] * 6
+        self.raw_cache = []
+        self.global_heart_peaks = None
+        
+        self.loaded_file = fpath
 
+        aux = data.get('AUX_signal', None)
+        if aux is not None:
+            aux = np.asarray(aux)
+            if aux.ndim == 1:
+                aux = aux.reshape(-1, 1)
+            elif aux.ndim == 2 and aux.shape[0] <= 4 and aux.shape[0] < aux.shape[1]:
+                # common case: (2, N) -> (N, 2)
+                aux = aux.T
+            self.aux_data = aux
+        else:
+            self.aux_data = None
+
+        # disable export until processing is done
+        self.export_btn.config(state="disabled")
+
+        # Update Time Sliders
+        self.total_duration = self.sEMG_data.shape[0] / self.fs
+        self.start_scale.config(to=self.total_duration)
+        self.end_scale.config(to=self.total_duration)
+        self.start_scale.set(0)
+        self.end_scale.set(self.total_duration)
+        
+        print("Pre-calculating raw geometry...")
+        for i in range(6):
+            start, end = i * 64, (i + 1) * 64
+            chunk = self.sEMG_data[:, start:end]
+            raw_geom = chunk.reshape(-1, 8, 8).transpose(0, 2, 1)[:, ::-1, :]
+            self.raw_cache.append(np.abs(raw_geom))
+        
+        self.file_lbl.config(text=f"{os.path.basename(fpath)} ({self.fs} Hz)", foreground="black")
+        self.proc_btn.config(state="normal", text="Run Auto-Processing")
+        self.vis_btn.config(state="normal")
+        self.inspect_btn.config(state="disabled")
+        self.proc_status_var.set("Status: Raw data ready.")
+        
     def on_time_change(self, val):
         # Enforce constraints: End > Start + 2s
         start = self.start_scale.get()
@@ -863,9 +889,9 @@ class EMGControlPanel:
             self.root.after(0, lambda: self.proc_status_var.set("Status: Processing Complete."))
             self.root.after(0, lambda: self.proc_btn.config(text="Processing Done (Cached)"))
             self.root.after(0, lambda: self.inspect_btn.config(state="normal"))
-            
+            self.root.after(0, lambda: self.export_btn.config(state="normal"))
         except Exception as e:
-            error_msg = str(e)  # capture it in a normal variable
+            error_msg = str(e)
             print(f"Error: {error_msg}")
             self.root.after(
                 0,
@@ -874,8 +900,7 @@ class EMGControlPanel:
         finally:
             self.root.after(0, lambda: self.vis_btn.config(state="normal"))
 
-    # --- COMPONENT INSPECTION ---
-    def on_inspect(self):
+    def on_inspect_grid_ICA_components(self):
         selection = self.grid_combo.get()
         if "Full Torso" in selection:
             messagebox.showinfo("Select Grid", "Please select a specific Grid to inspect.")
@@ -909,7 +934,138 @@ class EMGControlPanel:
         state['heatmap'] = heatmap
         self.proc_status_var.set(f"Status: Grid {grid_id} Updated Manually.")
 
-    # --- VISUALIZATION ---
+    def ask_export_hz(self):
+        fs_int = int(round(float(self.fs)))
+        divisors_under_200 = [hz for hz in range(1, 201) if fs_int % hz == 0]
+
+        under_100 = [hz for hz in divisors_under_200 if hz < 100]
+        default_hz = max(under_100) if under_100 else divisors_under_200[0]
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Export rate (Hz)")
+        dlg.resizable(False, False)
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text=f"Choose export sampling rate (Hz)\n(fs={fs_int} Hz, must divide fs, max 200 Hz):").pack(anchor="w")
+
+        hz_var = tk.StringVar(value=str(default_hz))
+        combo = ttk.Combobox(frm, textvariable=hz_var, values=[str(x) for x in divisors_under_200], state="readonly", width=12)
+        combo.pack(anchor="w", pady=(8, 12))
+        combo.set(str(default_hz))
+
+        result = {"hz": None}
+
+        def ok():
+            try:
+                result["hz"] = int(hz_var.get())
+            except:
+                result["hz"] = None
+            dlg.destroy()
+
+        def cancel():
+            result["hz"] = None
+            dlg.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Cancel", command=cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=ok).pack(side="right", padx=(0, 8))
+
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.wait_window()
+        return result["hz"]
+
+    def on_export(self):
+        if self.grid_states[0] is None:
+            messagebox.showwarning("Wait", "Please run processing first.")
+            return
+
+        export_hz = self.ask_export_hz()
+        if export_hz is None:
+            return
+
+        default_name = "export_processed.npz"
+        if self.loaded_file:
+            base = os.path.splitext(os.path.basename(self.loaded_file))[0]
+            default_name = f"{base}_processed_{export_hz}Hz.npz"
+
+        out_path = filedialog.asksaveasfilename(
+            defaultextension=".npz",
+            filetypes=[("NumPy archive", "*.npz")],
+            initialfile=default_name
+        )
+        if not out_path:
+            return
+
+        # Use the currently selected window
+        start_s = float(self.start_scale.get())
+        end_s = float(self.end_scale.get())
+        start_idx = int(start_s * self.fs)
+        end_idx = int(end_s * self.fs)
+
+        # Clamp to available lengths
+        n_emg = self.sEMG_data.shape[0]
+        end_idx = min(end_idx, n_emg)
+        start_idx = max(0, min(start_idx, end_idx - 1))
+
+        stride = self.fs // export_hz
+        fs_export = self.fs / stride
+
+        # Collect EMG (time, grid, ch)
+        grid_slices = []
+        bad_mask = np.zeros((6, 64), dtype=bool)
+
+        for gi, state in enumerate(self.grid_states):
+            sig = state['clean_signal']  # (n_samples, 64)
+            grid_slices.append(sig[start_idx:end_idx:stride])
+
+            bad = state.get('bad_electrodes', [])
+            if bad:
+                bad_mask[gi, bad] = True
+
+        emg_export = np.stack(grid_slices, axis=1)  # (n_t, 6, 64)
+
+        # AUX (device) aligned by sample index, if present
+        aux_export = None
+        if self.aux_data is not None and self.aux_data.ndim == 2 and self.aux_data.shape[0] > 0:
+            n_aux = self.aux_data.shape[0]
+            end_idx2 = min(end_idx, n_aux)
+            start_idx2 = min(start_idx, end_idx2 - 1) if end_idx2 > 0 else 0
+            aux_export = self.aux_data[start_idx2:end_idx2:stride]
+
+            # Ensure same length as EMG
+            n = min(emg_export.shape[0], aux_export.shape[0])
+            emg_export = emg_export[:n]
+            aux_export = aux_export[:n]
+
+        # Time vector for exported samples (seconds)
+        time_s = start_s + np.arange(emg_export.shape[0]) * (stride / self.fs)
+
+        meta = {
+            "source_file": self.loaded_file,
+            "fs_original_hz": float(self.fs),
+            "fs_export_hz": float(fs_export),
+            "stride": int(stride),
+            "window_start_s": float(start_s),
+            "window_end_s": float(end_s),
+            "n_samples_export": int(emg_export.shape[0]),
+            "emg_shape": list(emg_export.shape),
+            "aux_shape": (list(aux_export.shape) if aux_export is not None else None),
+        }
+
+        np.savez_compressed(
+            out_path,
+            emg=emg_export,          # (n_t, 6, 64)
+            aux=(aux_export if aux_export is not None else np.empty((0, 0))),
+            bad_mask=bad_mask,       # (6, 64) bool
+            time_s=time_s,           # (n_t,)
+            meta=json.dumps(meta)
+        )
+
+        messagebox.showinfo("Export", f"Saved:\n{out_path}")
+
     def on_visualize(self):
         threading.Thread(target=self.run_visualization_task, daemon=True).start()
 
