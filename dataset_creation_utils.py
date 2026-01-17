@@ -41,12 +41,12 @@ class Recording:
     good_mask: np.ndarray  # (6, 8, 8) float32 (1 good, 0 bad)
     fs: float              # fs_export_hz
 
+
 def _load_recording(npz_path: str) -> Recording:
     d = np.load(npz_path, allow_pickle=True)
 
     if "meta" not in d.files:
         raise ValueError(f"{npz_path} missing required 'meta' json string")
-
     meta = json.loads(str(d["meta"]))
     fs = float(meta["fs_export_hz"])
 
@@ -54,9 +54,9 @@ def _load_recording(npz_path: str) -> Recording:
         if key not in d.files:
             raise ValueError(f"{npz_path} missing '{key}'")
 
-    emg = d["emg"].astype(np.float32)        # (n_t,6,8,8)
-    aux = d["aux"].astype(np.float32)        # (n_t,2)
-    bad = d["bad_mask"].astype(bool)         # (6,8,8)
+    emg = d["emg"].astype(np.float32)
+    aux = d["aux"].astype(np.float32)
+    bad = d["bad_mask"].astype(bool)
 
     if emg.ndim != 4 or emg.shape[1:] != (6, 8, 8):
         raise ValueError(f"{npz_path} bad emg shape {emg.shape}, expected (n_t, 6, 8, 8)")
@@ -67,7 +67,6 @@ def _load_recording(npz_path: str) -> Recording:
     if aux.shape[0] == 0:
         raise ValueError(f"{npz_path} aux is empty; pump readings required")
 
-    # Align lengths defensively
     n = min(emg.shape[0], aux.shape[0])
     emg = emg[:n]
     aux = aux[:n]
@@ -93,7 +92,8 @@ def _scan_folder(folder: str) -> List[Recording]:
         raise ValueError(f"Different fs_export_hz across recordings: {fs_set}")
     return recs
 
-def _build_window_index_and_normalize(
+
+def _build_index(
     recs: Sequence[Recording],
     win_ms: float,
     delta_ms: float,
@@ -114,7 +114,6 @@ def _build_window_index_and_normalize(
     index: List[Tuple[int, int]] = []
     for rid, r in enumerate(recs):
         n = r.emg.shape[0]
-        # need: start+win <= n and start+delta+win <= n
         last_start = n - (delta + win)
         for start in range(0, max(0, last_start) + 1, step):
             if start + win <= n and start + delta + win <= n:
@@ -127,11 +126,8 @@ def _compute_norm_stats(
     train_rec_ids: Sequence[int],
 ) -> Tuple[float, float, np.ndarray, np.ndarray]:
     """
-    Global train-set normalization stats.
-    - X mean/std: one scalar over ALL masked EMG values
-    - y mean/std: per-target (2,) over all aux timestamps
-
-    This does NOT remove "heavy breathing" information; it rescales it.
+    Global train-set stats computed ONLY from the 6 EMG signal channels (masked).
+    Mask channels are NOT included and must not be normalized.
     """
     x_sum = 0.0
     x_sq = 0.0
@@ -145,6 +141,7 @@ def _compute_norm_stats(
         r = recs[rid]
         m = r.good_mask[None, :, :, :]     # (1,6,8,8)
         x = r.emg * m                      # ensure zeros at bad electrodes
+
         x_sum += float(x.sum())
         x_sq += float((x * x).sum())
         x_n += int(x.size)
@@ -164,11 +161,16 @@ def _compute_norm_stats(
 
     return float(x_mean), float(x_std), y_mean.astype(np.float32), y_std
 
+
 class EMGWindowDataset(Dataset):
     """
     Each item:
       X: (T, 12, 8, 8)  = [6 signal chans, 6 mask chans]
       y: (2,)           = mean(aux[t+delta : t+delta+T], axis=0)
+
+    Normalization:
+      - If normalize=True, we normalize ONLY signal channels (first 6).
+      - Mask channels remain 0/1.
     """
     def __init__(
         self,
@@ -206,27 +208,28 @@ class EMGWindowDataset(Dataset):
         x = r.emg[start : start + self.win]  # (T,6,8,8)
         m = r.good_mask                      # (6,8,8)
 
-        # Safety: enforce zeroing
+        # enforce zeroing
         x = x * m[None, :, :, :]
 
-        # Build X
+        if self.normalize:
+            x = (x - self.x_mean) / self.x_std
+            x = x * m[None, :, :, :]
+
         if self.include_mask_channels:
             m_time = np.broadcast_to(m[None, :, :, :], x.shape).astype(np.float32)  # (T,6,8,8)
             X = np.concatenate([x, m_time], axis=1)  # (T,12,8,8)
         else:
             X = x  # (T,6,8,8)
 
-        # Label: average aux over future window
         y_win = r.aux[start + self.delta : start + self.delta + self.win]  # (T,2)
-        y = y_win.mean(axis=0).astype(np.float32)  # (2,)
+        y = y_win.mean(axis=0).astype(np.float32)
 
         if self.normalize:
-            X = (X - self.x_mean) / self.x_std
             y = (y - self.y_mean) / self.y_std
 
         return torch.from_numpy(X), torch.from_numpy(y)
 
-# Public API: ONE function
+
 def create_train_test_datasets_from_folder(
     folder: str,
     *,
@@ -237,17 +240,6 @@ def create_train_test_datasets_from_folder(
     normalize: bool = True,
     include_mask_channels: bool = True,
 ) -> Tuple[Dataset, Dataset, Dict]:
-    """
-    Build TRAIN/TEST datasets from a folder of per-recording .npz files.
-
-    Split is RECORDING-WISE (prevents leakage).
-      - If test_recording is None: picks LAST recording by filename (sorted).
-      - If int: index into the sorted recordings list.
-      - If str: matched against recording base-name (exact match).
-
-    Returns:
-      train_ds, test_ds, info dict (names, ids, fs, window params, stats, counts).
-    """
     recs = _scan_folder(folder)
     names = [r.name for r in recs]
 
@@ -266,7 +258,7 @@ def create_train_test_datasets_from_folder(
 
     train_ids = [i for i in range(len(recs)) if i != test_id]
 
-    index_all, win, delta, step = _build_window_index_and_normalize(recs, win_ms=win_ms, delta_ms=delta_ms, step_ms=step_ms)
+    index_all, win, delta, step = _build_index(recs, win_ms=win_ms, delta_ms=delta_ms, step_ms=step_ms)
     train_index = [(rid, s) for (rid, s) in index_all if rid in train_ids]
     test_index = [(rid, s) for (rid, s) in index_all if rid == test_id]
 
@@ -275,7 +267,6 @@ def create_train_test_datasets_from_folder(
     if len(test_index) == 0:
         raise ValueError("Test index is empty. Check win_ms/delta_ms/step_ms vs recording lengths.")
 
-    # Normalization stats (train only)
     if normalize:
         x_mean, x_std, y_mean, y_std = _compute_norm_stats(recs, train_ids)
     else:
