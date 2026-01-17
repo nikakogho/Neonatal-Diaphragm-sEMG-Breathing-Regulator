@@ -18,6 +18,8 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def to_device(batch, device):
@@ -136,8 +138,15 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     in_ch = 6 if not include_mask_channels else 12
 
+    g = torch.Generator()
+    g.manual_seed(args.seed)
+
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch, shuffle=True, drop_last=True,
+        train_ds, batch_size=args.batch, shuffle=True, drop_last=False,
+        num_workers=0, pin_memory=torch.cuda.is_available(), generator=g
+    )
+    train_eval_loader = DataLoader(
+        train_ds, batch_size=max(64, args.batch), shuffle=False, drop_last=False,
         num_workers=0, pin_memory=torch.cuda.is_available()
     )
     test_loader = DataLoader(
@@ -185,6 +194,7 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         train_mse = train_epoch(model, train_loader, device, loss_fn, opt)
+        train_mse_eval, train_mae_phys = eval_epoch(model, train_eval_loader, device, loss_fn, y_mean, y_std)
         test_mse, test_mae_phys = eval_epoch(model, test_loader, device, loss_fn, y_mean, y_std)
         if scheduler is not None:
             scheduler.step(test_mse)
@@ -193,23 +203,32 @@ def main():
         history.append({
             "epoch": epoch,
             "train_mse_norm": train_mse,
+            "train_mse_norm_eval": train_mse_eval,
+            "train_mae_phys": train_mae_phys,
             "test_mse_norm": test_mse,
             "test_mae_phys": test_mae_phys,
             "lr": lr_now,
         })
 
-        print(f"Epoch {epoch:03d} | lr={lr_now:.2e} | trainMSE(norm)={train_mse:.6f} | testMSE(norm)={test_mse:.6f} | testMAE(phys)={test_mae_phys:.6f}")
+        print(
+            f"Epoch {epoch:03d} | lr={lr_now:.2e} | "
+            f"trainMSE(norm)={train_mse:.6f} | trainMSEeval(norm)={train_mse_eval:.6f} | trainMAE(phys)={train_mae_phys:.6f} | "
+            f"testMSE(norm)={test_mse:.6f} | testMAE(phys)={test_mae_phys:.6f}"
+        )
 
         # save best
-        if test_mse < best:
-            best = test_mse
+        score = train_mse_eval if args.overfit > 0 else test_mse
+        if score < best:
+            best = score
             best_epoch = epoch
             bad_epochs = 0
             torch.save(
                 {
                     "model_state": model.state_dict(),
                     "epoch": epoch,
-                    "best_test_mse_norm": best,
+                    "best_test_mse_norm": float(test_mse),
+                    "best_train_mse_norm_eval": float(train_mse_eval),
+                    "best_score": float(best),
                     "args": vars(args),
                     "dataset_info": info,
                 },
@@ -228,7 +247,10 @@ def main():
         json.dump(history, f, indent=2)
 
     print("\n=== DONE ===")
-    print("best testMSE(norm):", best, "at epoch", best_epoch)
+    if args.overfit > 0:
+        print("best trainMSEeval(norm):", best, "at epoch", best_epoch)
+    else:
+        print("best testMSE(norm):", best, "at epoch", best_epoch)
     print("run dir:", run_dir)
 
 
