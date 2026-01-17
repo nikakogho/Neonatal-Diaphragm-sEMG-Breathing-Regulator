@@ -936,10 +936,8 @@ class EMGControlPanel:
 
     def ask_export_hz(self):
         fs_int = int(round(float(self.fs)))
-        divisors_under_200 = [hz for hz in range(1, 201) if fs_int % hz == 0]
-
-        under_100 = [hz for hz in divisors_under_200 if hz < 100]
-        default_hz = max(under_100) if under_100 else divisors_under_200[0]
+        divisors = [hz for hz in range(1, fs_int + 1) if fs_int % hz == 0]
+        default_hz = 1024 if 1024 in divisors else fs_int
         dlg = tk.Toplevel(self.root)
         dlg.title("Export rate (Hz)")
         dlg.resizable(False, False)
@@ -947,10 +945,10 @@ class EMGControlPanel:
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill="both", expand=True)
 
-        ttk.Label(frm, text=f"Choose export sampling rate (Hz)\n(fs={fs_int} Hz, must divide fs, max 200 Hz):").pack(anchor="w")
+        ttk.Label(frm, text=f"Choose export sampling rate (Hz)\n(fs={fs_int} Hz, must divide fs, max 2048 Hz):").pack(anchor="w")
 
         hz_var = tk.StringVar(value=str(default_hz))
-        combo = ttk.Combobox(frm, textvariable=hz_var, values=[str(x) for x in divisors_under_200], state="readonly", width=12)
+        combo = ttk.Combobox(frm, textvariable=hz_var, values=[str(x) for x in divisors], state="readonly", width=12)
         combo.pack(anchor="w", pady=(8, 12))
         combo.set(str(default_hz))
 
