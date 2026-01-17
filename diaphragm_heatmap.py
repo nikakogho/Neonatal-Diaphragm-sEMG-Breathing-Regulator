@@ -1063,7 +1063,7 @@ class EMGControlPanel:
         np.savez_compressed(
             out_path,
             emg=emg_export,          # (n_t, 6, 8, 8)
-            aux=(aux_export if aux_export is not None else np.empty((0, 0))),
+            aux=(aux_export if aux_export is not None else np.empty((0, 0))), # (n_t, 2)
             bad_mask=bad_mask_grid,       # (6, 8, 8) bool
             time_s=time_s,           # (n_t,)
             meta=json.dumps(meta)
