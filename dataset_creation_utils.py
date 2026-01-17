@@ -126,8 +126,17 @@ def _compute_norm_stats(
     train_rec_ids: Sequence[int],
 ) -> Tuple[float, float, np.ndarray, np.ndarray]:
     """
-    Global train-set stats computed ONLY from the 6 EMG signal channels (masked).
-    Mask channels are NOT included and must not be normalized.
+    Train-only normalization stats.
+
+    EMG (X) stats:
+      - computed ONLY over good electrodes (mask==1)
+      - pooled across all train recordings, all time, all grids
+
+    AUX (y) stats:
+      - per-target mean/std over all train timestamps (no masking)
+
+    Returns:
+      x_mean (float), x_std (float), y_mean (2,), y_std (2,)
     """
     x_sum = 0.0
     x_sq = 0.0
@@ -139,27 +148,40 @@ def _compute_norm_stats(
 
     for rid in train_rec_ids:
         r = recs[rid]
-        m = r.good_mask[None, :, :, :]     # (1,6,8,8)
-        x = r.emg * m                      # ensure zeros at bad electrodes
 
-        x_sum += float(x.sum())
-        x_sq += float((x * x).sum())
-        x_n += int(x.size)
+        # x: (n_t, 6, 8, 8)
+        x = r.emg
+        m = r.good_mask.astype(bool)  # (6,8,8), True = good electrode
 
+        # Select only good electrode values across all time
+        # x[:, m] works because (6,8,8) flattens as a boolean mask over last 3 dims
+        x_good = x[:, m]  # (n_t, n_good)
+
+        # Accumulate
+        x_sum += float(x_good.sum())
+        x_sq += float((x_good * x_good).sum())
+        x_n += int(x_good.size)
+
+        # y stats (aux): (n_t,2)
         y = r.aux
         y_sum += y.sum(axis=0)
         y_sq += (y * y).sum(axis=0)
         y_n += int(y.shape[0])
 
-    x_mean = x_sum / max(1, x_n)
-    x_var = x_sq / max(1, x_n) - x_mean * x_mean
+    # Guardrails
+    if x_n == 0:
+        raise ValueError("No good-electrode samples found (x_n==0). Check masks / data export.")
+
+    x_mean = x_sum / x_n
+    x_var = x_sq / x_n - x_mean * x_mean
     x_std = float(np.sqrt(max(1e-12, x_var)))
 
-    y_mean = y_sum / max(1, y_n)
-    y_var = y_sq / max(1, y_n) - y_mean * y_mean
+    y_mean = (y_sum / max(1, y_n)).astype(np.float32)
+    y_var = y_sq / max(1, y_n) - (y_mean.astype(np.float64) ** 2)
     y_std = np.sqrt(np.maximum(1e-12, y_var)).astype(np.float32)
 
-    return float(x_mean), float(x_std), y_mean.astype(np.float32), y_std
+    return float(x_mean), float(x_std), y_mean, y_std
+
 
 
 class EMGWindowDataset(Dataset):
