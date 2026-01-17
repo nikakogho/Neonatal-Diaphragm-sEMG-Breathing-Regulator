@@ -235,7 +235,7 @@ class EMGWindowDataset(Dataset):
 
         if self.normalize:
             x = (x - self.x_mean) / self.x_std
-            x = x * m[None, :, :, :]
+            x = x * m[None, :, :, :] # remask after normalization so bad electrodes are still 0
 
         if self.include_mask_channels:
             m_time = np.broadcast_to(m[None, :, :, :], x.shape).astype(np.float32)  # (T,6,8,8)
