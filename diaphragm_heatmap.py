@@ -58,7 +58,7 @@ def detect_bad_electrodes(filtered_grid, fs):
     n_samples, n_channels = x.shape
     assert n_channels == 64, "Expected 64 channels per grid."
 
-    # -------- 1) RMS-based checks (flat + global outliers) --------
+    # 1) RMS-based checks (flat + global outliers)
     rms = np.sqrt(np.mean(x**2, axis=0))  # (64,)
     med_rms = np.median(rms)
     mad_rms = np.median(np.abs(rms - med_rms)) + 1e-12  # robust scale
@@ -84,7 +84,7 @@ def detect_bad_electrodes(filtered_grid, fs):
     if 0 < len(extremely_loud) <= MAX_EXTREME_PER_GRID:
         bad_indices.update(extremely_loud.tolist())
 
-    # -------- neighbor utility --------
+    # neighbor utility
     def neighbors(idx):
         """Return indices of up/down/left/right neighbors in the 8x8 layout."""
         r = idx // 8   # 0..7
@@ -96,7 +96,7 @@ def detect_bad_electrodes(filtered_grid, fs):
         if c < 7: neigh.append(r * 8 + (c + 1))
         return neigh
 
-    # -------- 2) Local amplitude ratio: much louder than neighbors --------
+    # 2) Local amplitude ratio: much louder than neighbors
     LOCAL_RATIO_THRESH = 3.0  # >3x neighbor median RMS
 
     for ch in range(n_channels):
@@ -120,7 +120,7 @@ def detect_bad_electrodes(filtered_grid, fs):
             bad_indices.add(ch)
             continue
 
-    # -------- 3) Global loud + decorrelated from neighbors --------
+    # 3) Global loud + decorrelated from neighbors
     CORR_THRESH = 0.2  # very low median correlation
 
     for ch in global_loud:
@@ -236,7 +236,7 @@ def analyze_envelope_refined(sources, fs, global_heart_peaks=None):
                 if dist < sync_tol_samples: match_count += 1
             capture_rate = match_count / len(scaled_global_peaks)
 
-        # --- CLASSIFICATION ---
+        # CLASSIFICATION
         
         if dom_freq > 12.0:
             hf_noise.append(i)
@@ -278,7 +278,7 @@ def reconstruct_heatmap(ica, sources, bad_ICA_components, bad_electrodes, fs, go
     Reconstructs 'Clean' signal and 'Heatmap' envelope.
 
     Parameters
-    ----------
+   --
     ica : FastICA
         Fitted ICA model.
     sources : np.ndarray
@@ -298,7 +298,7 @@ def reconstruct_heatmap(ica, sources, bad_ICA_components, bad_electrodes, fs, go
         Total number of channels in the grid (default 64).
 
     Returns
-    -------
+   ----
     grid_matrix : np.ndarray
         Shape (n_time, 8, 8) envelope values for heatmap.
     clean_signal : np.ndarray
