@@ -33,6 +33,87 @@ def load_mat_any(path):
         print(f"Error loading MAT: {e}")
         return None
 
+def extract_emg_and_aux(data):
+    """
+    Extract sEMG and AUX signals from either data format.
+    
+    Format 1: Separate 'sEMG' and 'AUX_signal' fields
+        - 'sEMG': shape (384, n_timestamp) -> transpose to (n_timestamp, 384)
+        - 'AUX_signal': shape (2, n_timestamp) or (n_timestamp, 2) -> normalized to (n_timestamp, 2)
+    
+    Format 2: Single 'Data' field
+        - 'Data': shape (386, n_timestamp) where:
+          - First 384 entries are sEMG signals
+          - Last 2 entries are AUX signals
+        - Return: (sEMG as (n_timestamp, 384), AUX as (n_timestamp, 2))
+    
+    Returns:
+        tuple: (sEMG_data, aux_data) where
+            - sEMG_data: ndarray of shape (n_timestamp, 384)
+            - aux_data: ndarray of shape (n_timestamp, 2) or None if not present
+    """
+    sEMG_data = None
+    aux_data = None
+    
+    # Check for new format: 'Data' field
+    if 'Data' in data:
+        full_data = np.asarray(data['Data'])
+        # Expected shape: (n_timestamp, 386)
+        if full_data.ndim == 1:
+            # Reshape if needed
+            raise ValueError("'Data' field has unexpected 1D shape")
+        
+        # If shape is (n, 386), extract first 384 as sEMG and last 2 as AUX
+        if full_data.shape[1] == 386:
+            sEMG_data = full_data[:, :384]
+            aux_data = full_data[:, 384:]
+        else:
+            raise ValueError(f"'Data' field has unexpected shape: {full_data.shape}. Expected (386, n_timestamp).")
+    
+    # Check for old format: separate 'sEMG' and 'AUX_signal' fields
+    elif 'sEMG' in data:
+        sEMG_data = np.asarray(data['sEMG'])
+        # Expected shape: (384, n_timestamp) -> transpose to (n_timestamp, 384)
+        if sEMG_data.ndim == 1:
+            raise ValueError("'sEMG' field has unexpected 1D shape")
+        if sEMG_data.shape[0] != 384:
+            # Try transposing if it looks like (n_timestamp, 384) already
+            if sEMG_data.shape[1] == 384:
+                pass  # Already in correct orientation
+            else:
+                raise ValueError(f"'sEMG' field has unexpected shape: {sEMG_data.shape}")
+        else:
+            # Transpose from (384, n_timestamp) to (n_timestamp, 384)
+            sEMG_data = sEMG_data.T
+        
+        # Extract AUX_signal if present
+        if 'AUX_signal' in data:
+            aux_data = np.asarray(data['AUX_signal'])
+            if aux_data.ndim == 1:
+                aux_data = aux_data.reshape(-1, 1)
+            elif aux_data.ndim == 2:
+                # Handle both (2, n_timestamp) and (n_timestamp, 2) cases
+                if aux_data.shape[0] <= 4 and aux_data.shape[0] < aux_data.shape[1]:
+                    # (2, n_timestamp) -> (n_timestamp, 2)
+                    aux_data = aux_data.T
+            # Ensure (n_timestamp, 2)
+            if aux_data.shape[1] != 2:
+                raise ValueError(f"AUX_signal has unexpected shape: {aux_data.shape}")
+    
+    else:
+        raise ValueError("Data must contain either 'sEMG' or 'Data' field")
+    
+    return sEMG_data, aux_data
+
+def extract_sampling_frequency(data):
+    ''' it is either called fsamp or SamplingFrequency '''
+    if 'fsamp' in data:
+        return float(data['fsamp'])
+    elif 'SamplingFrequency' in data:
+        return float(data['SamplingFrequency'])
+    else:
+        raise ValueError("Sampling frequency not found in data (expected 'fsamp' or 'SamplingFrequency' field)")
+
 def filter_data(data, fs):
     # 50Hz Notch
     b_notch, a_notch = iirnotch(w0=50.0, Q=30.0, fs=fs)
@@ -797,29 +878,23 @@ class EMGControlPanel:
         self.root.update()
         
         data = load_mat_any(fpath)
-        if not (data and 'sEMG' in data):
-            messagebox.showerror("Error", "Invalid .mat file")
+        if not data:
+            messagebox.showerror("Error", "Failed to load .mat file")
             return
         
-        self.sEMG_data = data['sEMG'].T
-        self.fs = data['fsamp']
+        # Extract sEMG and AUX using unified function
+        try:
+            self.sEMG_data, self.aux_data = extract_emg_and_aux(data)
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid .mat file format: {e}")
+            return
+        
+        self.fs = extract_sampling_frequency(data)
+        
         self.grid_states = [None] * 6
         self.raw_cache = []
         self.global_heart_peaks = None
-        
         self.loaded_file = fpath
-
-        aux = data.get('AUX_signal', None)
-        if aux is not None:
-            aux = np.asarray(aux)
-            if aux.ndim == 1:
-                aux = aux.reshape(-1, 1)
-            elif aux.ndim == 2 and aux.shape[0] <= 4 and aux.shape[0] < aux.shape[1]:
-                # common case: (2, N) -> (N, 2)
-                aux = aux.T
-            self.aux_data = aux
-        else:
-            self.aux_data = None
 
         # disable export until processing is done
         self.export_btn.config(state="disabled")
@@ -1008,7 +1083,7 @@ class EMGControlPanel:
         end_idx = min(end_idx, n_emg)
         start_idx = max(0, min(start_idx, end_idx - 1))
 
-        stride = self.fs // export_hz
+        stride = int(self.fs // export_hz)
         fs_export = self.fs / stride
 
         # Collect EMG in 8x8 geometry: (time, grid, 8, 8)
@@ -1017,6 +1092,7 @@ class EMGControlPanel:
 
         for gi, state in enumerate(self.grid_states):
             sig = state["clean_signal"]                 # (n_samples, 64)
+            #print(f'Taking interval of {start_idx}:{end_idx} with stride {stride}')
             sig_win = sig[start_idx:end_idx:stride]     # (n_t, 64)
 
             sig_grid = sig_win.reshape(-1, 8, 8).transpose(0, 2, 1)[:, ::-1, :]  # (n_t, 8, 8)
