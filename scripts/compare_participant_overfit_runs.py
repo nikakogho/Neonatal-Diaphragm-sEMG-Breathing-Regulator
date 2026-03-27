@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List
@@ -34,6 +35,21 @@ def _read_per_recording_rows(run_dir: Path) -> List[Dict[str, object]]:
         return list(csv.DictReader(handle))
 
 
+def _infer_participant_id(config: Dict[str, object], metrics: Dict[str, object]) -> int | None:
+    if "participant_id" in metrics:
+        return int(metrics["participant_id"])
+    if "participant_id" in config:
+        return int(config["participant_id"])
+    text = f"{config.get('recordings_dir', '')} {config.get('run_dir', '')}"
+    match = re.search(r"participant\s*(\d+)", text, flags=re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"par(?:ticipant)?\s*(\d+)rec", text, flags=re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def _row_from_run(run_dir: Path) -> Dict[str, object]:
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
@@ -41,6 +57,7 @@ def _row_from_run(run_dir: Path) -> Dict[str, object]:
     dynamic_rows = [row for row in per_recording_rows if row.get("is_dynamic_recording") == "True"]
     return {
         "run_dir": str(run_dir),
+        "participant_id": _infer_participant_id(config, metrics),
         "model": config["model"],
         "win_ms": int(config["win_ms"]),
         "delta_ms": int(config["delta_ms"]),
@@ -63,8 +80,15 @@ def _row_from_run(run_dir: Path) -> Dict[str, object]:
 
 def _render_markdown(rows: List[Dict[str, object]]) -> str:
     best = rows[0] if rows else None
+    participant_ids = sorted({row["participant_id"] for row in rows if row.get("participant_id") is not None})
+    if len(participant_ids) == 1:
+        title = f"Participant {participant_ids[0]} Step 2 Hyperparameter Comparison"
+        participant_label = f"participant {participant_ids[0]}"
+    else:
+        title = "Participant-Level Step 2 Hyperparameter Comparison"
+        participant_label = "this participant"
     lines = [
-        "# Participant 4 Step 2 Hyperparameter Comparison",
+        f"# {title}",
         "",
         "## Overall Ranking",
         "",
@@ -93,7 +117,7 @@ def _render_markdown(rows: List[Dict[str, object]]) -> str:
     lines.extend(
         [
             "## Conclusion",
-            "- The raw 1D CNN remained the right architecture for pooled participant-4 overfit.",
+            f"- The raw 1D CNN remained the right architecture for pooled {participant_label} overfit.",
             "- Keeping the same timing pair from step 1 (`300 ms / -150 ms`) stayed best in step 2 as well.",
             "- Extending the original raw-CNN run to more epochs improved the pooled fit materially and was better than widening the network or switching to the feature CNN.",
             "",

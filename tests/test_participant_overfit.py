@@ -5,6 +5,8 @@ Tests for participant-level pooled overfit workflow.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -33,14 +35,21 @@ def _write_recording(path: Path, fs: float = 100.0, phase: float = 0.0, scale: f
     np.savez(path, emg=emg, aux=aux, bad_mask=bad_mask, time_s=t, meta=meta)
 
 
-def _write_participant_dir(root: Path) -> Path:
-    participant_dir = root / "participant 4 stuff"
+def _write_participant_dir(root: Path, participant_id: int = 4) -> Path:
+    participant_dir = root / f"participant {participant_id} stuff"
     participant_dir.mkdir(parents=True, exist_ok=True)
-    specs = [
-        ("p4rec3_processed_1024Hz.npz", 0.0, 1.0),
-        ("p4rec5_processed_1024Hz.npz", 0.5, 1.1),
-        ("p4rec6_processed_1024Hz.npz", 1.0, 0.9),
-    ]
+    if participant_id == 4:
+        specs = [
+            ("p4rec3_processed_1024Hz.npz", 0.0, 1.0),
+            ("p4rec5_processed_1024Hz.npz", 0.5, 1.1),
+            ("p4rec6_processed_1024Hz.npz", 1.0, 0.9),
+        ]
+    else:
+        specs = [
+            (f"par{participant_id}rec1_processed_1024Hz.npz", 0.0, 1.0),
+            (f"par{participant_id}rec2_processed_1024Hz.npz", 0.5, 1.1),
+            (f"par{participant_id}rec3_processed_1024Hz.npz", 1.0, 0.9),
+        ]
     for name, phase, scale in specs:
         _write_recording(participant_dir / name, phase=phase, scale=scale)
     return participant_dir
@@ -119,3 +128,59 @@ def test_participant_overfit_experiment_writes_artifacts(tmp_path: Path):
     readme = (run_dir / "README.md").read_text(encoding="utf-8")
     assert "Shuffle Evidence" in readme
     assert "Exact Model Architecture" in readme
+
+
+def test_participant_readme_uses_inferred_participant_id(tmp_path: Path):
+    participant_dir = _write_participant_dir(tmp_path, participant_id=9)
+    run_dir = tmp_path / "participant9_run"
+    run_single = run_participant_overfit_experiment(
+        recordings_dir=str(participant_dir),
+        model_name="cnn1d_feature_scalar",
+        win_ms=100,
+        delta_ms=0,
+        step_ms=50,
+        epochs=1,
+        batch_size=8,
+        lr=1e-3,
+        weight_decay=1e-5,
+        dropout=0.1,
+        base_channels=8,
+        device="cpu",
+        run_dir=run_dir,
+    )
+    assert int(run_single["metrics"]["participant_id"]) == 9
+    readme = (run_dir / "README.md").read_text(encoding="utf-8")
+    summary = (run_dir / "summary.md").read_text(encoding="utf-8")
+    assert "Participant 9 Step 2 Overfit Demo" in readme
+    assert "participant 9" in readme.lower()
+    assert "Participant 9 Overfit Summary" in summary
+    assert "participant 4 at the same time" not in readme.lower()
+    assert "selection_context.csv" not in readme
+
+
+def test_compare_participant_runs_uses_generic_participant_labels(tmp_path: Path, repo_root: Path):
+    participant_dir = _write_participant_dir(tmp_path, participant_id=9)
+    run_dir = tmp_path / "participant9_run"
+    run_participant_overfit_experiment(
+        recordings_dir=str(participant_dir),
+        model_name="constant_mean_scalar",
+        win_ms=100,
+        delta_ms=0,
+        step_ms=50,
+        epochs=1,
+        batch_size=8,
+        device="cpu",
+        run_dir=run_dir,
+    )
+    output_dir = tmp_path / "comparison"
+    cmd = [
+        sys.executable,
+        str(repo_root / "scripts" / "compare_participant_overfit_runs.py"),
+        "--output_dir",
+        str(output_dir),
+        str(run_dir),
+    ]
+    subprocess.run(cmd, check=True, cwd=repo_root, capture_output=True, text=True)
+    summary = (output_dir / "summary.md").read_text(encoding="utf-8")
+    assert "Participant 9 Step 2 Hyperparameter Comparison" in summary
+    assert "participant-4 overfit" not in summary.lower()

@@ -317,14 +317,34 @@ def _plot_per_recording_timeseries(predictions: Dict[str, np.ndarray], path: Pat
     plt.close(fig)
 
 
-def _participant_artifact_guide_lines(has_checkpoints: bool, has_selection_context: bool) -> List[str]:
+def _participant_id_from_recordings(recordings) -> int:
+    participant_ids = sorted({int(recording.pid) for recording in recordings})
+    if len(participant_ids) != 1:
+        raise ValueError(f"Expected a single participant in pooled run, got participant ids {participant_ids}")
+    return int(participant_ids[0])
+
+
+def _participant_title(participant_id: int) -> str:
+    return f"Participant {int(participant_id)}"
+
+
+def _participant_label(participant_id: int) -> str:
+    return f"participant {int(participant_id)}"
+
+
+def _participant_artifact_guide_lines(
+    participant_id: int,
+    has_checkpoints: bool,
+    has_selection_context: bool,
+) -> List[str]:
+    participant_label = _participant_label(participant_id)
     lines = [
         "- `config.json`: exact run configuration and hyperparameters.",
         "- `metrics.json`: pooled metrics, per-recording threshold summary, window counts, and timing.",
         "- `runtime.json`: Python, torch, venv, and GPU runtime information for this run.",
         "- `model_info.json`: exact architecture description and parameter counts.",
         "- `history.csv` / `history.json`: per-epoch training loss.",
-        "- `predictions.csv` / `predictions.npz`: pooled per-window predictions across all participant-4 recordings.",
+        f"- `predictions.csv` / `predictions.npz`: pooled per-window predictions across all {participant_label} recordings.",
         "- `per_recording_metrics.csv`: one row per recording with RMSE, MAE, R2, Pearson, and variance context.",
         "- `shuffle_audit.csv`: evidence that epoch-1 batches mixed windows from multiple recordings.",
         "- `README.md`: polished presentation document for this run.",
@@ -344,19 +364,21 @@ def _participant_artifact_guide_lines(has_checkpoints: bool, has_selection_conte
             ]
         )
     if has_selection_context:
-        lines.append("- `selection_context.csv`: supporting step-1 participant-4 comparison used to justify the starting configuration.")
+        lines.append("- `selection_context.csv`: supporting participant-4 comparison used to justify the starting configuration.")
     return lines
 
 
 def write_participant_overfit_summary(
     run_dir: Path,
+    participant_id: int,
     config: Dict[str, object],
     metrics: Dict[str, object],
     has_checkpoints: bool,
     has_selection_context: bool,
 ) -> None:
+    participant_title = _participant_title(participant_id)
     lines = [
-        "# Participant-Level Overfit Summary",
+        f"# {participant_title} Overfit Summary",
         "",
         "Main presentation document: [README.md](README.md)",
         "",
@@ -380,7 +402,7 @@ def write_participant_overfit_summary(
         f"- Dynamic recordings all meet R2 >= 0.98: `{metrics['dynamic_recordings_meet_r2_threshold']}`",
         "",
         "## Artifact Guide",
-        *_participant_artifact_guide_lines(has_checkpoints, has_selection_context),
+        *_participant_artifact_guide_lines(participant_id, has_checkpoints, has_selection_context),
         "",
         "## Main Charts",
         "![Loss curve](loss_curve.png)",
@@ -400,6 +422,7 @@ def write_participant_overfit_summary(
 
 def write_participant_overfit_readme(
     run_dir: Path,
+    participant_id: int,
     config: Dict[str, object],
     metrics: Dict[str, object],
     runtime_info: Dict[str, object],
@@ -410,13 +433,15 @@ def write_participant_overfit_readme(
     has_checkpoints: bool,
 ) -> None:
     mean_unique = float(np.mean([int(row["unique_recordings"]) for row in shuffle_rows])) if shuffle_rows else 0.0
+    participant_title = _participant_title(participant_id)
+    participant_label = _participant_label(participant_id)
     lines = [
-        "# Participant 4 Step 2 Overfit Demo",
+        f"# {participant_title} Step 2 Overfit Demo",
         "",
         "## Goal",
-        "Show that one scalar model can overfit all cleaned recordings from participant 4 at the same time.",
+        f"Show that one scalar model can overfit all cleaned recordings from {participant_label} at the same time.",
         "",
-        "This is still an overfit-stage experiment: the same pooled set of windows is used for training and evaluation. The important difference from step 1 is that the model now sees windows from every participant-4 recording in one shared training run.",
+        f"This is still an overfit-stage experiment: the same pooled set of windows is used for training and evaluation. The important difference from step 1 is that the model now sees windows from every {participant_label} recording in one shared training run.",
         "",
         "## Run At A Glance",
         f"- Recordings directory: `{config['recordings_dir']}`",
@@ -432,9 +457,9 @@ def write_participant_overfit_readme(
         f"- Running inside venv: `{runtime_info['in_venv']}`",
         "",
         "## Main Outcome",
-        f"This pooled run overfits participant 4 strongly: pooled RMSE `{metrics['eval_metrics']['rmse']:.6f}`, "
+        f"This pooled run overfits {participant_label} strongly: pooled RMSE `{metrics['eval_metrics']['rmse']:.6f}`, "
         f"MAE `{metrics['eval_metrics']['mae']:.6f}`, Pearson `{metrics['eval_metrics']['pearson']:.6f}`, "
-        f"and R2 `{metrics['eval_metrics']['r2']:.6f}` on all participant-4 windows together.",
+        f"and R2 `{metrics['eval_metrics']['r2']:.6f}` on all {participant_label} windows together.",
         "",
         "| Metric | Train | Eval |",
         "| --- | ---: | ---: |",
@@ -478,7 +503,7 @@ def write_participant_overfit_readme(
         [
             "",
             "## Exact Data and Label Definition",
-            "- One pooled dataset is built from all `.npz` recordings in the participant-4 directory.",
+            f"- One pooled dataset is built from all `.npz` recordings in the {participant_label} directory.",
             f"- Input representation: `{model_info['feature_mode']}`",
             f"- Each window contributes one scalar label: the mean of `AUX[{config['target_channel']}]` over the shifted target window.",
             "- Windows from all recordings share one global normalization and one shared model.",
@@ -535,10 +560,20 @@ def write_participant_overfit_readme(
                 "",
             ]
         )
+    else:
+        lines.extend(
+            [
+                "## Starting Configuration",
+                "This validation run starts from the participant-4 pooled winner so we can test whether the same step-2 setup transfers to another participant.",
+                "- Starting point: raw 1D CNN, scalar `AUX[0]`, `300 ms / -150 ms / 50 ms` timing.",
+                "- If needed, tuning is limited to a short participant-level ladder rather than a fresh search.",
+                "",
+            ]
+        )
     lines.extend(
         [
             "## Artifact Guide",
-            *_participant_artifact_guide_lines(has_checkpoints, bool(selection_context_rows)),
+            *_participant_artifact_guide_lines(participant_id, has_checkpoints, bool(selection_context_rows)),
             "",
             "## Plots",
             "### Loss Curve",
@@ -570,6 +605,7 @@ def write_participant_overfit_readme(
 
 def _save_participant_artifacts(
     run_dir: Path,
+    participant_id: int,
     config: Dict[str, object],
     history: Sequence[Dict[str, float]],
     predictions: Dict[str, np.ndarray],
@@ -636,6 +672,7 @@ def _save_participant_artifacts(
     has_selection_context = bool(selection_context_rows)
     write_participant_overfit_summary(
         run_dir,
+        participant_id,
         config,
         metrics,
         has_checkpoints=has_checkpoints,
@@ -643,6 +680,7 @@ def _save_participant_artifacts(
     )
     write_participant_overfit_readme(
         run_dir,
+        participant_id,
         config,
         metrics,
         runtime_info,
@@ -686,9 +724,10 @@ def run_participant_overfit_experiment(
         target_channel=target_channel,
         feature_mode=feature_mode,
     )
+    participant_id = _participant_id_from_recordings(dataset.recordings)
     selection_context_rows = (
         _load_selection_context_rows()
-        if all(int(recording.pid) == 4 for recording in dataset.recordings)
+        if int(participant_id) == 4
         and model_name in {"cnn1d_raw_scalar", "cnn1d_feature_scalar"}
         else []
     )
@@ -698,6 +737,7 @@ def run_participant_overfit_experiment(
     shuffle_rows = build_shuffle_audit_rows(dataset, first_epoch_order, batch_size=int(batch_size))
     window_samples = int(round(dataset.recordings[0].fs_hz * win_ms / 1000.0))
     config = {
+        "participant_id": int(participant_id),
         "recordings_dir": str(recordings_dir),
         "model": model_name,
         "win_ms": int(win_ms),
@@ -790,6 +830,7 @@ def run_participant_overfit_experiment(
     )
     dynamic_rows = [row for row in per_recording_metrics if bool(row["is_dynamic_recording"])]
     metrics = {
+        "participant_id": int(participant_id),
         "train_metrics": train_metrics,
         "eval_metrics": eval_metrics,
         "fit_seconds": float(fit_seconds),
@@ -814,6 +855,7 @@ def run_participant_overfit_experiment(
     if run_dir is not None:
         _save_participant_artifacts(
             run_dir=run_dir,
+            participant_id=participant_id,
             config=config,
             history=history,
             predictions=predictions,
