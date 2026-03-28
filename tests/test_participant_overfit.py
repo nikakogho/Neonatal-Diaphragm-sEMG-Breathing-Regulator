@@ -184,3 +184,65 @@ def test_compare_participant_runs_uses_generic_participant_labels(tmp_path: Path
     summary = (output_dir / "summary.md").read_text(encoding="utf-8")
     assert "Participant 9 Step 2 Hyperparameter Comparison" in summary
     assert "participant-4 overfit" not in summary.lower()
+
+
+def test_compare_participant_runs_ranks_by_dynamic_min_r2_before_pooled_r2(tmp_path: Path, repo_root: Path):
+    output_dir = tmp_path / "comparison"
+    run_a = tmp_path / "run_a"
+    run_b = tmp_path / "run_b"
+    for run_dir, eval_r2, dynamic_min_r2 in [
+        (run_a, 0.992, 0.970),
+        (run_b, 0.991, 0.985),
+    ]:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "participant_id": 10,
+                    "recordings_dir": "extra_patients/participant 10 stuff",
+                    "model": "cnn1d_raw_scalar",
+                    "win_ms": 300,
+                    "delta_ms": -150,
+                    "epochs": 350,
+                    "batch_size": 16,
+                    "lr": 3e-4,
+                    "dropout": 0.15,
+                    "base_channels": 16,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "metrics.json").write_text(
+            json.dumps(
+                {
+                    "participant_id": 10,
+                    "eval_metrics": {
+                        "r2": eval_r2,
+                        "rmse": 0.1,
+                        "mae": 0.08,
+                        "pearson": 0.99,
+                    },
+                    "dynamic_recordings_meet_r2_threshold": False,
+                    "dynamic_recording_min_r2": dynamic_min_r2,
+                    "fit_seconds": 100.0,
+                    "recording_count": 7,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "per_recording_metrics.csv").write_text(
+            "recording_name,is_dynamic_recording,r2\npar10rec1_processed_1024Hz,True,0.99\n",
+            encoding="utf-8",
+        )
+
+    cmd = [
+        sys.executable,
+        str(repo_root / "scripts" / "compare_participant_overfit_runs.py"),
+        "--output_dir",
+        str(output_dir),
+        str(run_a),
+        str(run_b),
+    ]
+    subprocess.run(cmd, check=True, cwd=repo_root, capture_output=True, text=True)
+    leaderboard = (output_dir / "leaderboard.csv").read_text(encoding="utf-8").splitlines()
+    assert "run_b" in leaderboard[1]

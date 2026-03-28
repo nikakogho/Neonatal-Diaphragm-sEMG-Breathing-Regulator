@@ -92,6 +92,31 @@ Interpretation:
 - participant 9 was harder than participant 4 in this same-window pooled setting
 - the limiting recordings were `par9rec2` and `par9rec6`, so participant 9 supports the same architecture choice but not yet the same per-recording overfit quality as participant 4
 
+### Additional step-2 validation on participant 10
+
+We also repeated the pooled step-2 workflow on participant 10:
+
+- [`runs/p10_all_recordings_overfit_demo_raw300_delta-100_20260328_013950/README.md`](./runs/p10_all_recordings_overfit_demo_raw300_delta-100_20260328_013950/README.md)
+- [`runs/participant10_step2_hyperparam_comparison/summary.md`](./runs/participant10_step2_hyperparam_comparison/summary.md)
+
+Main participant-10 result:
+
+- model: `cnn1d_raw_scalar`
+- target: mean `AUX[0]` over the shifted target window
+- window / delta / step: `300 ms / -100 ms / 50 ms`
+- epochs / batch / lr / dropout / base channels: `350 / 16 / 3e-4 / 0.15 / 16`
+- pooled train/eval RMSE: `0.081444`
+- pooled train/eval MAE: `0.059245`
+- pooled train/eval Pearson: `0.996934`
+- pooled train/eval R2: `0.990947`
+- dynamic participant-10 recordings (`par10rec1` to `par10rec5`) all reached `R2 >= 0.98`
+
+Interpretation:
+
+- the same raw 1D CNN remained the best participant-10 model family
+- participant 10 preferred a slightly different timing pair than participants 4 and 9: `300 ms / -100 ms` beat the old `300 ms / -150 ms` baseline
+- unlike participant 9, participant 10 did achieve the dynamic-recording overfit target after the timing search
+
 ## Model that worked in step 1 and step 2
 
 The strongest model so far is a **raw 1D CNN scalar regressor**:
@@ -147,23 +172,40 @@ Step-2 hyperparameters that worked best:
 - `seed=13`
 - device: `cuda`
 
+Best participant-10 validation variant:
+
+- model: `cnn1d_raw_scalar`
+- recordings: all cleaned `.npz` files in `extra_patients/participant 10 stuff`
+- target channel: `AUX[0]`
+- `win_ms=300`
+- `delta_ms=-100`
+- `step_ms=50`
+- `epochs=350`
+- `batch_size=16`
+- `lr=3e-4`
+- `weight_decay=1e-5`
+- `dropout=0.15`
+- `base_channels=16`
+- `seed=13`
+- device: `cuda`
+
 ## What currently looks most promising for the next stages
 
 Given the shape of the data and the task, the most promising direction right now is:
 
-- **Primary candidate:** raw 1D CNN with `300 ms` windows and roughly `-150 ms` target offset
+- **Primary candidate:** raw 1D CNN with `300 ms` windows and a target offset in roughly the `-150 ms` to `-100 ms` range
 - **Secondary / lighter reference candidate:** feature 1D CNN with the same `300 ms / -150 ms` timing
 
 Why this is our current view:
 
 - each EMG window is short enough for 1D temporal convolutions to be practical
 - each window still contains a lot of spatial information (`6 x 8 x 8 = 384` channels), so keeping the raw window is useful
-- the raw 1D CNN consistently beat the nearby feature-based alternatives on both the participant-4 and participant-9 pooled comparisons
-- the `300 ms / -150 ms` timing pair remained the strongest candidate across `p4rec3`, `p4rec5`, `p4rec6`, the pooled participant-4 step-2 runs, and the participant-9 validation runs
+- the raw 1D CNN consistently beat the nearby feature-based alternatives on the participant-4, participant-9, and participant-10 pooled comparisons
+- participants 4 and 9 were best at `300 ms / -150 ms`, while participant 10 was best at `300 ms / -100 ms`
 - for pooled same-person memorization, simply training the same raw model longer worked better than widening it or switching to the feature CNN
-- participant 9 suggests the same architecture and timing transfer, but it is a harder participant and may need more tuning or a different training setup for fully uniform per-recording fit
+- participant 9 suggests the same architecture transfers even when one participant is harder, and participant 10 shows that a modest timing adjustment can recover strong per-recording overfit
 
-So for the next stages, the raw 1D CNN is the first model we should keep testing, and the feature 1D CNN is the sensible backup / comparison baseline. For future predictive stages, the current best starting point is the same raw architecture and timing, but the evaluation protocol should switch from same-window overfit to held-out recordings or held-out time ranges with early stopping.
+So for the next stages, the raw 1D CNN is the first model we should keep testing, and the feature 1D CNN is the sensible backup / comparison baseline. For future predictive stages, the current best starting point is the same raw architecture with `300 ms` windows and a lag in the `-150 ms` to `-100 ms` range, but the evaluation protocol should switch from same-window overfit to held-out recordings or held-out time ranges with early stopping.
 
 ## Next planned modeling steps
 
@@ -272,6 +314,7 @@ What we have shown so far:
 - preprocessing pipeline exists and exports cleaned diaphragm-focused EMG recordings
 - step 1 overfit on one recording of one participant works very well
 - step 2 pooled overfit on all recordings of one participant with one shared model also works well
+- participant-10 validation shows that the same raw model family remains strongest, and that a small timing shift can materially improve pooled same-person overfit
 
 What is still missing:
 

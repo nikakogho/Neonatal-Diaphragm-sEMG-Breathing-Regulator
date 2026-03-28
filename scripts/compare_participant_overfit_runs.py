@@ -103,6 +103,7 @@ def _render_markdown(rows: List[Dict[str, object]]) -> str:
         )
     lines.extend(["", "## Selected Run", ""])
     if best is not None:
+        timing_matches_baseline = int(best["win_ms"]) == 300 and int(best["delta_ms"]) == -150
         lines.extend(
             [
                 f"- Best run: `{best['run_dir']}`",
@@ -114,11 +115,20 @@ def _render_markdown(rows: List[Dict[str, object]]) -> str:
                 "",
             ]
         )
+    timing_line = "- The best timing pair in this comparison was determined by the run ranking above."
+    if best is not None:
+        if timing_matches_baseline:
+            timing_line = "- The original `300 ms / -150 ms` timing pair remained the best choice in this comparison."
+        else:
+            timing_line = (
+                f"- The best timing pair in this comparison was `win_ms={best['win_ms']}`, "
+                f"`delta_ms={best['delta_ms']}`, which outperformed the original `300 ms / -150 ms` baseline."
+            )
     lines.extend(
         [
             "## Conclusion",
             f"- The raw 1D CNN remained the right architecture for pooled {participant_label} overfit.",
-            "- Keeping the same timing pair from step 1 (`300 ms / -150 ms`) stayed best in step 2 as well.",
+            timing_line,
             "- Extending the original raw-CNN run to more epochs improved the pooled fit materially and was better than widening the network or switching to the feature CNN.",
             "",
             "## Files",
@@ -140,6 +150,7 @@ def main() -> None:
     rows.sort(
         key=lambda item: (
             not item["dynamic_recordings_meet_r2_threshold"],
+            -item["dynamic_recording_min_r2"],
             -item["eval_r2"],
             item["eval_rmse"],
             item["fit_seconds"],
