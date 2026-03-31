@@ -21,16 +21,26 @@ from .cohort_overfit import (
     build_cohort_shuffle_audit_rows,
     run_cohort_overfit_experiment,
 )
+from .participant_prediction import (
+    ParticipantPredictionDataset,
+    build_prediction_shuffle_audit_rows,
+    make_leave_one_recording_out_folds,
+    run_participant_prediction_stage,
+)
 
 __all__ = [
     "compute_scalar_metrics",
     "build_shuffle_audit_rows",
     "build_cohort_shuffle_audit_rows",
+    "build_prediction_shuffle_audit_rows",
     "make_single_recording_split",
     "make_epoch_order",
+    "make_leave_one_recording_out_folds",
     "CohortScalarWindowDataset",
+    "ParticipantPredictionDataset",
     "ParticipantScalarWindowDataset",
     "run_cohort_overfit_experiment",
+    "run_participant_prediction_stage",
     "refresh_single_recording_summary",
     "run_participant_overfit_experiment",
     "run_single_recording_experiment",

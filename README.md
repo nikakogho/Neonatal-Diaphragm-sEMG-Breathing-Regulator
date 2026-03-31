@@ -163,6 +163,51 @@ Interpretation:
 - a shared `-125 ms` timing probe was worse, and a wider raw CNN probe was also worse
 - so the current evidence is that the same simple shared raw-CNN setup that works for one participant at a time does **not** scale cleanly to pooled same-window overfit across participants 4, 9, and 10
 
+### Step 3 first real same-person prediction benchmark
+
+We then moved beyond same-window memorization and ran the first real same-person prediction benchmark on participant 4:
+
+- [`runs/p4_step3_prediction_leave_one_out_20260331_132530/README.md`](./runs/p4_step3_prediction_leave_one_out_20260331_132530/README.md)
+- [`runs/p4_step3_prediction_leave_one_out_20260331_132530/selected_run/README.md`](./runs/p4_step3_prediction_leave_one_out_20260331_132530/selected_run/README.md)
+- [`runs/p4_step3_prediction_leave_one_out_20260331_132530/comparison/summary.md`](./runs/p4_step3_prediction_leave_one_out_20260331_132530/comparison/summary.md)
+
+Protocol:
+
+- outer loop: leave one full participant-4 recording out
+- inner validation: last 20% of windows from the remaining training recordings
+- held-out recording excluded from fitting, normalization, and checkpoint selection
+
+Main step-3 result:
+
+- outcome label: `mixed`
+- selected complete config: `cnn1d_feature_scalar`, `300 ms / -100 ms / 50 ms`
+- epochs / batch / lr / dropout / base channels: `60 / 64 / 1e-3 / 0.10 / 32`
+- weighted all-holdout RMSE: `4.452581`
+- weighted all-holdout MAE: `2.063797`
+- weighted all-holdout Pearson: `0.114024`
+- weighted all-holdout R2: `-28.210087`
+- dynamic median held-out R2: `0.253661`
+- dynamic positive-R2 folds: `5 / 7`
+
+Interpretation:
+
+- this is the first same-person prediction result, and it is **not** a clean success
+- the best complete model did learn some held-out dynamic recordings, but it did not meet the repository's `works` threshold
+- the low-variance contextual held-outs (`p4rec11`, `p4rec1`) were especially unstable and dragged the weighted pooled metrics down sharply
+
+Runtime note:
+
+- the intended fixed-first baseline was still the raw 1D CNN that won step 2: `300 ms / -150 ms`
+- we started that first at [`runs/p4_step3_prediction_leave_one_out_20260330_222524/comparison/runs/cnn1d_raw_scalar_win300_delta-150_bs16_lr3e-04_drop015_base16`](./runs/p4_step3_prediction_leave_one_out_20260330_222524/comparison/runs/cnn1d_raw_scalar_win300_delta-150_bs16_lr3e-04_drop015_base16)
+- on this local GTX 1650, that raw held-out benchmark was not practical to finish as a full candidate: the `p4rec2` fold alone took `37644.95` seconds for `66` epochs
+- because of that, the completed comparison in step 3 uses lighter feature-CNN rescue configurations
+
+Key step-3 charts:
+
+![Participant 4 step-3 held-out R2 and RMSE](./runs/p4_step3_prediction_leave_one_out_20260331_132530/holdout_r2_rmse.png)
+
+![Participant 4 step-3 held-out scatter](./runs/p4_step3_prediction_leave_one_out_20260331_132530/aggregate_holdout_scatter.png)
+
 ## Model that worked in step 1 and step 2
 
 The strongest model so far is a **raw 1D CNN scalar regressor**:
@@ -256,9 +301,8 @@ So for the next stages, the raw 1D CNN is still the first model we should keep t
 
 ## Next planned modeling steps
 
-The next steps are **not implemented yet**. They are the planned progression after step 2:
+The next planned step is **not implemented yet**:
 
-3. **Check predictive ability for one given person with one model.**
 4. **Check predictive ability when we train on multiple people, then expose the model to a few recordings of a new person, and see whether later recordings of that new person can be picked up.**
 
 ## Repository layout
@@ -277,12 +321,16 @@ The next steps are **not implemented yet**. They are the planned progression aft
   - pooled participant-level overfit workflow, per-recording reporting, and shuffle audit generation
 - [`src/training/cohort_overfit.py`](./src/training/cohort_overfit.py)
   - pooled multi-participant overfit workflow with per-participant and per-recording reporting
+- [`src/training/participant_prediction.py`](./src/training/participant_prediction.py)
+  - leave-one-recording-out participant prediction workflow, per-fold checkpoints, and held-out reporting
 - [`scripts/train_single_recording.py`](./scripts/train_single_recording.py)
   - main training entrypoint for the current step-1 style runs
 - [`scripts/train_participant_overfit.py`](./scripts/train_participant_overfit.py)
   - pooled participant-level training entrypoint for the current step-2 style runs
 - [`scripts/train_cohort_overfit.py`](./scripts/train_cohort_overfit.py)
   - pooled multi-participant training entrypoint for the harder combined-cohort overfit experiment
+- [`scripts/train_participant_prediction.py`](./scripts/train_participant_prediction.py)
+  - participant-level leave-one-recording-out prediction entrypoint for the current step-3 style run
 - [`scripts/run_single_recording_sweep.py`](./scripts/run_single_recording_sweep.py)
   - timing/model sweep helper
 - [`scripts/compare_participant_overfit_runs.py`](./scripts/compare_participant_overfit_runs.py)
@@ -381,6 +429,17 @@ venv\Scripts\python scripts\train_cohort_overfit.py `
   --run_dir runs\example_cohort_overfit
 ```
 
+### 6. Run participant held-out prediction
+
+```powershell
+venv\Scripts\python scripts\train_participant_prediction.py `
+  --recordings_dir "extra_patients\participant 4 stuff" `
+  --device cuda `
+  --require_venv `
+  --require_cuda `
+  --run_dir runs\example_participant_prediction
+```
+
 ## Research status
 
 This repository is still a research workflow, not a deployment-ready ventilator controller.
@@ -395,5 +454,4 @@ What we have shown so far:
 
 What is still missing:
 
-- same-person predictive testing
 - multi-person training with adaptation to a new person after a few observed recordings
